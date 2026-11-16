@@ -39,6 +39,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // noticesPath is inside the main package's kodata directory, which is how ko embeds a file in
@@ -49,6 +51,55 @@ const noticesPath = "cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES"
 
 // mainModule is excluded: its own terms are LICENSE and NOTICE at the repository root.
 const mainModule = "github.com/obayer/kiebitzr"
+
+// koConfigPath is where the platforms come from. Reading them rather than repeating them is
+// what keeps the notice covering exactly what is released: if .ko.yaml gains a platform, the
+// next run picks it up and the gate reports the file as out of date.
+const koConfigPath = ".ko.yaml"
+
+// koConfig is the part of ko's configuration this needs.
+type koConfig struct {
+	DefaultPlatforms []string `yaml:"defaultPlatforms"`
+	Builds           []struct {
+		ID        string   `yaml:"id"`
+		Platforms []string `yaml:"platforms"`
+	} `yaml:"builds"`
+}
+
+// releasePlatforms reads the platforms the release is built for, sorted so the generated file
+// does not depend on their order in the configuration.
+func releasePlatforms(path string) ([]platform, error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // a constant repository-relative path
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var cfg koConfig
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// A per-build `platforms` key would override defaultPlatforms for that build, and this
+	// would then describe the wrong artefact. Refuse rather than guess: nothing in this
+	// repository uses one today, and if that changes it has to be handled deliberately.
+	for _, b := range cfg.Builds {
+		if len(b.Platforms) > 0 {
+			return nil, fmt.Errorf("%s: build %q overrides platforms; teach licenseguard to read it", path, b.ID)
+		}
+	}
+	if len(cfg.DefaultPlatforms) == 0 {
+		return nil, fmt.Errorf("%s: no defaultPlatforms — the notice cannot say what it covers", path)
+	}
+
+	platforms := make([]platform, 0, len(cfg.DefaultPlatforms))
+	for _, entry := range cfg.DefaultPlatforms {
+		os, arch, found := strings.Cut(entry, "/")
+		if !found || os == "" || arch == "" {
+			return nil, fmt.Errorf("%s: %q is not a GOOS/GOARCH pair", path, entry)
+		}
+		platforms = append(platforms, platform{OS: os, Arch: arch})
+	}
+	slices.SortFunc(platforms, func(a, b platform) int { return strings.Compare(a.String(), b.String()) })
+	return platforms, nil
+}
 
 // licenseName matches the names a license text is kept under: LICENSE, LICENCE, UNLICENSE,
 // COPYING, NOTICE, PATENTS, with the suffixes those pick up (LICENSE.md, LICENSE-APACHE,
@@ -84,9 +135,17 @@ func main() {
 	}
 }
 
-// lister returns the output of `go list -deps -json` for one pattern. Injected so the tests do
-// not need a module to resolve.
-type lister func(ctx context.Context, pattern string) ([]byte, error)
+// lister returns the output of `go list -deps -json` for one pattern on one platform. Injected
+// so the tests do not need a module to resolve.
+type lister func(ctx context.Context, pattern string, p platform) ([]byte, error)
+
+// platform is one GOOS/GOARCH pair the release is built for.
+type platform struct {
+	OS   string
+	Arch string
+}
+
+func (p platform) String() string { return p.OS + "/" + p.Arch }
 
 // stdlibSource returns the toolchain's own license components. Injected for the same reason.
 type stdlibSource func() ([]component, error)
@@ -123,14 +182,28 @@ type component struct {
 }
 
 func run(ctx context.Context, write bool, out io.Writer, list lister, std stdlibSource) error {
-	// No build tags: the release build is what is distributed, and the `dev` build links a
-	// kubeconfig loader that never ships (ADR 0004). Notices follow what is shipped.
-	raw, err := list(ctx, "./cmd/kiebitzr")
+	// The link set depends on the platform, so the notice has to be taken over the platforms
+	// that are actually shipped rather than over whichever one the generator runs on. Measured:
+	// a Linux build links github.com/prometheus/procfs and a macOS build does not, while macOS
+	// links github.com/ncruces/go-strftime instead — so a file generated on a workstation both
+	// omitted a component of the image and listed one that is not in it.
+	targets, err := releasePlatforms(koConfigPath)
 	if err != nil {
 		return err
 	}
 
-	components, missing, err := collect(raw, std)
+	// No build tags: the release build is what is distributed, and the `dev` build links a
+	// kubeconfig loader that never ships (ADR 0004). Notices follow what is shipped.
+	raws := make([][]byte, 0, len(targets))
+	for _, target := range targets {
+		raw, listErr := list(ctx, "./cmd/kiebitzr", target)
+		if listErr != nil {
+			return listErr
+		}
+		raws = append(raws, raw)
+	}
+
+	components, missing, err := collect(raws, std)
 	if err != nil {
 		return err
 	}
@@ -141,7 +214,7 @@ func run(ctx context.Context, write bool, out io.Writer, list lister, std stdlib
 			len(missing), strings.Join(missing, "\n  "))
 	}
 
-	rendered := render(components)
+	rendered := render(components, targets)
 
 	if write {
 		if err := os.WriteFile(noticesPath, rendered, 0o644); err != nil { //nolint:gosec // a notices file is world-readable on purpose
@@ -172,56 +245,59 @@ func report(out io.Writer, format string, args ...any) error {
 
 // collect turns `go list -deps -json` output into the components to reproduce, plus the import
 // paths that have no license text anywhere.
-func collect(raw []byte, std stdlibSource) (components []component, missing []string, err error) {
-	// A license directory is reached from many packages; collecting by directory keeps one
-	// entry per text rather than one per importer.
+func collect(raws [][]byte, std stdlibSource) (components []component, missing []string, err error) {
+	// A license directory is reached from many packages, and from more than one platform;
+	// collecting by directory keeps one entry per text rather than one per importer, and makes
+	// the result the union over the platforms instead of whichever was listed last.
 	seen := map[string]component{}
 	var stdlib bool
 
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	for {
-		var p pkg
-		if decErr := dec.Decode(&p); errors.Is(decErr, io.EOF) {
-			break
-		} else if decErr != nil {
-			return nil, nil, fmt.Errorf("parse go list output: %w", decErr)
-		}
-
-		switch {
-		case p.Standard:
-			// The standard library is linked in as much as any dependency, and its terms
-			// are the toolchain's own. One entry covers all of it.
-			stdlib = true
-			continue
-		case p.Module == nil:
-			return nil, nil, fmt.Errorf("%s belongs to no module", p.ImportPath)
-		case p.Module.Path == mainModule:
-			continue
-		}
-
-		dir, files := findLicense(p.Dir, p.Module.Dir)
-		if len(files) == 0 {
-			missing = append(missing, p.ImportPath)
-			continue
-		}
-		subdir, relErr := filepath.Rel(p.Module.Dir, dir)
-		if relErr != nil {
-			return nil, nil, fmt.Errorf("%s: %w", p.ImportPath, relErr)
-		}
-		if subdir == "." {
-			subdir = ""
-		}
-		for _, name := range files {
-			text, readErr := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // the directory comes from `go list`, the name from a directory listing
-			if readErr != nil {
-				return nil, nil, fmt.Errorf("read license of %s: %w", p.ImportPath, readErr)
+	for _, raw := range raws {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		for {
+			var p pkg
+			if decErr := dec.Decode(&p); errors.Is(decErr, io.EOF) {
+				break
+			} else if decErr != nil {
+				return nil, nil, fmt.Errorf("parse go list output: %w", decErr)
 			}
-			seen[filepath.Join(dir, name)] = component{
-				Module:  p.Module.Path,
-				Version: p.Module.Version,
-				Subdir:  subdir,
-				File:    name,
-				Text:    string(text),
+
+			switch {
+			case p.Standard:
+				// The standard library is linked in as much as any dependency, and its terms
+				// are the toolchain's own. One entry covers all of it.
+				stdlib = true
+				continue
+			case p.Module == nil:
+				return nil, nil, fmt.Errorf("%s belongs to no module", p.ImportPath)
+			case p.Module.Path == mainModule:
+				continue
+			}
+
+			dir, files := findLicense(p.Dir, p.Module.Dir)
+			if len(files) == 0 {
+				missing = append(missing, p.ImportPath)
+				continue
+			}
+			subdir, relErr := filepath.Rel(p.Module.Dir, dir)
+			if relErr != nil {
+				return nil, nil, fmt.Errorf("%s: %w", p.ImportPath, relErr)
+			}
+			if subdir == "." {
+				subdir = ""
+			}
+			for _, name := range files {
+				text, readErr := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // the directory comes from `go list`, the name from a directory listing
+				if readErr != nil {
+					return nil, nil, fmt.Errorf("read license of %s: %w", p.ImportPath, readErr)
+				}
+				seen[filepath.Join(dir, name)] = component{
+					Module:  p.Module.Path,
+					Version: p.Module.Version,
+					Subdir:  subdir,
+					File:    name,
+					Text:    string(text),
+				}
 			}
 		}
 	}
@@ -301,7 +377,12 @@ func standardLibrary(ctx context.Context) ([]component, error) {
 // render writes the notice. It carries no timestamp and no absolute path on purpose: the file
 // is committed, so anything that changes without the link set changing would make the gate
 // fail on noise and teach everybody to regenerate without reading.
-func render(components []component) []byte {
+func render(components []component, targets []platform) []byte {
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, t.String())
+	}
+
 	var b strings.Builder
 	b.WriteString(`Third-party notices for Kiebitzr
 ===============================
@@ -316,8 +397,11 @@ Generated from the release build configuration of ./cmd/kiebitzr by ` + "`mise r
 checked by ` + "`mise run licenses:check`" + `. Component names and license identifiers are also in
 the SPDX SBOM attached to every release image.
 
-Components: `)
-	fmt.Fprintf(&b, "%d\n", len(components))
+The set of linked packages depends on the target, so this is the union over the platforms the
+release is built for, taken from .ko.yaml rather than from whichever machine generated it.
+
+Platforms: `)
+	fmt.Fprintf(&b, "%s\nComponents: %d\n", strings.Join(names, ", "), len(components))
 
 	rule := strings.Repeat("-", 96)
 	for _, c := range components {
@@ -335,13 +419,17 @@ Components: `)
 	return []byte(b.String())
 }
 
-func goList(ctx context.Context, pattern string) ([]byte, error) {
+func goList(ctx context.Context, pattern string, p platform) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", pattern) //nolint:gosec // fixed command, pattern is a constant from this file
+	// The target decides which files the build constraints admit, and CGO decides it too — both
+	// are pinned here rather than inherited, so the result does not depend on the caller's
+	// environment. CGO_ENABLED=0 is what .ko.yaml builds with.
+	cmd.Env = append(os.Environ(), "GOOS="+p.OS, "GOARCH="+p.Arch, "CGO_ENABLED=0")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("go list -deps -json %s: %w: %s", pattern, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("go list -deps -json %s for %s: %w: %s", pattern, p, err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }

@@ -73,9 +73,14 @@ single home: one private GitHub repository. There is no mirror elsewhere.
   (`tools/licenseguard`) collects the texts from the link set of the release build into
   `cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES`, which ko embeds in the image at `$KO_DATA_PATH`;
   `licenses:check` is a gate, because a generated file nobody regenerates is the one that goes
-  quietly wrong. Measured: **384 components, 2.3 MB, about two seconds.** No license classifier
-  is involved — two dependencies here carry valid license files that no classifier can name,
-  and a notice needs the text rather than the name.
+  quietly wrong. Measured: **385 components, 2.3 MB, about three seconds.** No license
+  classifier is involved — two dependencies here carry valid license files that no classifier
+  can name, and a notice needs the text rather than the name. The collection runs over the
+  platforms in `defaultPlatforms` above, read from this file rather than repeated: the link set
+  depends on the target, and the first CI run proved it — a Linux build links
+  `github.com/prometheus/procfs`, a macOS build links `github.com/ncruces/go-strftime` instead,
+  so a notice generated on a workstation had omitted a component of the image and listed one
+  that is not in it.
 - **Actions are pinned to a commit**, with the version they carried in a trailing comment. A
   tag is a moving reference its owner can repoint, and the release job holds `packages: write`
   and `id-token: write` — the one place where a repointed tag would run beside the signing key.

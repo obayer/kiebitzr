@@ -59,7 +59,7 @@ func TestLicenseAtTheModuleRootIsFound(t *testing.T) {
 		map[string]string{"dep/LICENSE": "MIT text"},
 		module("example.com/dep/sub", "dep/sub", "example.com/dep", "dep", "v1.2.3"),
 	)
-	components, missing, err := collect(listed, noStdlib)
+	components, missing, err := collect([][]byte{listed}, noStdlib)
 	if err != nil || len(missing) > 0 {
 		t.Fatalf("collect() = %v, missing %v", err, missing)
 	}
@@ -83,7 +83,7 @@ func TestASubdirectoryLicenseWinsOverTheModuleRoot(t *testing.T) {
 		},
 		module("example.com/dep/third_party/x", "dep/third_party/x", "example.com/dep", "dep", "v1"),
 	)
-	components, _, err := collect(listed, noStdlib)
+	components, _, err := collect([][]byte{listed}, noStdlib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestNoticeAndLicenseAreBothCollected(t *testing.T) {
 		map[string]string{"dep/LICENSE": "apache text", "dep/NOTICE": "attribution"},
 		module("example.com/dep", "dep", "example.com/dep", "dep", "v1"),
 	)
-	components, _, err := collect(listed, noStdlib)
+	components, _, err := collect([][]byte{listed}, noStdlib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestAPackageWithoutALicenseIsReported(t *testing.T) {
 		map[string]string{"dep/code.go": "package dep"},
 		module("example.com/dep", "dep", "example.com/dep", "dep", "v1"),
 	)
-	_, missing, err := collect(listed, noStdlib)
+	_, missing, err := collect([][]byte{listed}, noStdlib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestTheMainModuleAndTheStandardLibraryAreHandledSeparately(t *testing.T) {
 	toolchain := func() ([]component, error) {
 		return []component{{Module: "go", Version: "go1.27.4", File: "LICENSE", Text: "bsd"}}, nil
 	}
-	components, missing, err := collect(listed, toolchain)
+	components, missing, err := collect([][]byte{listed}, toolchain)
 	if err != nil || len(missing) > 0 {
 		t.Fatalf("collect() = %v, missing %v", err, missing)
 	}
@@ -172,7 +172,7 @@ func TestTheMainModuleAndTheStandardLibraryAreHandledSeparately(t *testing.T) {
 
 func TestAPackageWithoutAModuleIsAnError(t *testing.T) {
 	listed := tree(t, nil, pkg{ImportPath: "example.com/x", Dir: "x"})
-	if _, _, err := collect(listed, noStdlib); err == nil {
+	if _, _, err := collect([][]byte{listed}, noStdlib); err == nil {
 		t.Fatal("collect() = nil, want an error for a package with no module")
 	}
 }
@@ -185,11 +185,12 @@ func TestRenderIsDeterministicAndCarriesNoPaths(t *testing.T) {
 		{Module: "example.com/b", Version: "v2", File: "LICENSE", Text: "b text\n\n"},
 		{Module: "example.com/a", Version: "v1", Subdir: "sub", File: "LICENSE", Text: "a text"},
 	}
-	first := string(render(components))
-	if second := string(render(components)); first != second {
+	targets := []platform{{OS: "linux", Arch: "amd64"}, {OS: "linux", Arch: "arm64"}}
+	first := string(render(components, targets))
+	if second := string(render(components, targets)); first != second {
 		t.Fatal("render() is not deterministic")
 	}
-	for _, want := range []string{"example.com/a v1 (sub)", "example.com/b v2", "a text", "b text", "Components: 2"} {
+	for _, want := range []string{"example.com/a v1 (sub)", "example.com/b v2", "a text", "b text", "Components: 2", "linux/amd64, linux/arm64"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("render() does not contain %q", want)
 		}
@@ -199,6 +200,9 @@ func TestRenderIsDeterministicAndCarriesNoPaths(t *testing.T) {
 	}
 }
 
+// koYAML is the minimum .ko.yaml run() needs: the platforms the notice covers.
+const koYAML = "defaultPlatforms:\n  - linux/arm64\n  - linux/amd64\n"
+
 func TestWriteThenCheckPasses(t *testing.T) {
 	// The paths the tool reads and writes are repository-relative, so the test runs from a
 	// directory of its own.
@@ -206,11 +210,14 @@ func TestWriteThenCheckPasses(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(noticesPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(koConfigPath, []byte(koYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	listed := tree(t,
 		map[string]string{"dep/LICENSE": "MIT text"},
 		module("example.com/dep", "dep", "example.com/dep", "dep", "v1"),
 	)
-	list := func(context.Context, string) ([]byte, error) { return listed, nil }
+	list := func(context.Context, string, platform) ([]byte, error) { return listed, nil }
 
 	if err := run(context.Background(), true, io.Discard, list, noStdlib); err != nil {
 		t.Fatalf("run(write) = %v", err)
@@ -225,9 +232,76 @@ func TestWriteThenCheckPasses(t *testing.T) {
 		module("example.com/dep", "dep", "example.com/dep", "dep", "v1"),
 		module("example.com/other", "other", "example.com/other", "other", "v1"),
 	)
-	stale := func(context.Context, string) ([]byte, error) { return grown, nil }
+	stale := func(context.Context, string, platform) ([]byte, error) { return grown, nil }
 	err := run(context.Background(), false, io.Discard, stale, noStdlib)
 	if err == nil || !strings.Contains(err.Error(), "out of date") {
 		t.Fatalf("run(check) with a new dependency = %v, want an out-of-date error", err)
+	}
+}
+
+// The defect the first CI run found: the link set depends on the target, so a file generated
+// on one platform both omits components of the image and lists components that are not in it.
+// Measured on this tree — a Linux build links github.com/prometheus/procfs, a macOS build
+// links github.com/ncruces/go-strftime instead. The notice therefore has to be the union over
+// the platforms that are released, and must not depend on where it was generated.
+func TestTheResultIsTheUnionOverThePlatforms(t *testing.T) {
+	onePlatform := tree(t,
+		map[string]string{"linuxonly/LICENSE": "linux terms"},
+		module("example.com/linuxonly", "linuxonly", "example.com/linuxonly", "linuxonly", "v1"),
+	)
+	other := tree(t,
+		map[string]string{"darwinonly/LICENSE": "darwin terms"},
+		module("example.com/darwinonly", "darwinonly", "example.com/darwinonly", "darwinonly", "v1"),
+	)
+
+	components, missing, err := collect([][]byte{onePlatform, other}, noStdlib)
+	if err != nil || len(missing) > 0 {
+		t.Fatalf("collect() = %v, missing %v", err, missing)
+	}
+	if len(components) != 2 {
+		t.Fatalf("got %d components, want both platforms' dependencies: %+v", len(components), components)
+	}
+	// And the order must not depend on which platform was listed first.
+	reversed, _, err := collect([][]byte{other, onePlatform}, noStdlib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if components[0].Module != reversed[0].Module || components[1].Module != reversed[1].Module {
+		t.Errorf("the order depends on the platform order: %+v vs %+v", components, reversed)
+	}
+}
+
+func TestReleasePlatformsComeFromTheKoConfig(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), ".ko.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	// Sorted, so the generated file does not depend on the order in the configuration.
+	got, err := releasePlatforms(write(t, koYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].String() != "linux/amd64" || got[1].String() != "linux/arm64" {
+		t.Errorf("releasePlatforms() = %v, want linux/amd64 then linux/arm64", got)
+	}
+
+	for name, body := range map[string]string{
+		"no platforms at all":    "builds:\n  - id: kiebitzr\n",
+		"not a GOOS/GOARCH pair": "defaultPlatforms:\n  - linux\n",
+		"a per-build override":   "defaultPlatforms:\n  - linux/amd64\nbuilds:\n  - id: kiebitzr\n    platforms:\n      - linux/arm64\n",
+		"not even valid YAML":    "defaultPlatforms: [\n",
+	} {
+		if _, err := releasePlatforms(write(t, body)); err == nil {
+			t.Errorf("releasePlatforms() accepted %s", name)
+		}
+	}
+
+	if _, err := releasePlatforms(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
+		t.Error("releasePlatforms() accepted a missing file")
 	}
 }

@@ -96,7 +96,7 @@ description = "Scan every commit in the history for credentials, not just the cu
 run = "betterleaks git --config .betterleaks.toml --no-banner --redact ."
 
 [tasks.licenses]
-description = "Regenerate cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES: the license text of every component linked into the release binary, collected from the module cache. Run after a dependency change, then commit the file — it ships inside the image, because ko embeds everything under kodata and the licenses of a statically linked binary have to travel with the binary"
+description = "Regenerate cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES: the license text of every component linked into the release binary, collected from the module cache. Run after a dependency change, then commit the file — it ships inside the image, because ko embeds everything under kodata and the licenses of a statically linked binary have to travel with the binary. The result is the union over the platforms in .ko.yaml and therefore the same on any machine; generating it for the host would describe the wrong artefact"
 run = "go run ./tools/licenseguard -write"
 
 [tasks."licenses:check"]
