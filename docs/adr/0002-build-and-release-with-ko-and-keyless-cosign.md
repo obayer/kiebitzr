@@ -66,7 +66,12 @@ single home: one private GitHub repository. There is no mirror elsewhere.
   detector, `govulncheck`, `betterleaks`.
 - **Weekly scheduled rebuild** of the latest release tag, so standard-library and base-image
   fixes reach the image without a code change.
-- **Renovate** keeps Go modules, GitHub Actions (pinned by digest) and mise tools current.
+- **Actions are pinned to a commit**, with the version they carried in a trailing comment. A
+  tag is a moving reference its owner can repoint, and the release job holds `packages: write`
+  and `id-token: write` — the one place where a repointed tag would run beside the signing key.
+- **Renovate** is configured (`renovate.json`) to keep Go modules, those action digests and the
+  mise tool versions current. It is **not** yet enabled on the repository, so nothing updates
+  them today; the pins above were set by hand. See `TODO.md`.
 - Commits use the GitHub no-reply address; no personal e-mail appears in history.
 
 ## Consequences

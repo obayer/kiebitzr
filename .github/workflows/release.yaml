@@ -23,7 +23,13 @@ jobs:
     env:
       KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/kiebitzr
     steps:
-      - uses: actions/checkout@v4
+      # Every action is pinned to a commit rather than to a tag, and the trailing comment
+      # names the version that commit belonged to. A tag is a moving reference that whoever
+      # owns the action can repoint, and this job is the worst place for that: it holds
+      # `packages: write` and `id-token: write`, so a moved tag would execute in the one
+      # job that pushes an image and signs it with this repository's identity. Renovate
+      # keeps digest and comment current (renovate.json, helpers:pinGitHubActionDigests).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -40,11 +46,11 @@ jobs:
       - name: Check out the release tag
         run: git checkout "${{ steps.ref.outputs.tag }}"
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           install_args: go ko
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
