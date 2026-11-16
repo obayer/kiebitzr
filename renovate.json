@@ -6,7 +6,13 @@
     ":semanticCommits"
   ],
   "postUpdateOptions": ["gomodTidy"],
-  "vulnerabilityAlerts": { "enabled": true, "labels": ["security"] },
+  "schedule": ["before 5am on monday"],
+  "prConcurrentLimit": 3,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
   "packageRules": [
     {
       "matchManagers": ["gomod"],

@@ -69,9 +69,13 @@ single home: one private GitHub repository. There is no mirror elsewhere.
 - **Actions are pinned to a commit**, with the version they carried in a trailing comment. A
   tag is a moving reference its owner can repoint, and the release job holds `packages: write`
   and `id-token: write` — the one place where a repointed tag would run beside the signing key.
-- **Renovate** is configured (`renovate.json`) to keep Go modules, those action digests and the
-  mise tool versions current. It is **not** yet enabled on the repository, so nothing updates
-  them today; the pins above were set by hand. See `TODO.md`.
+- **Renovate** keeps Go modules, those action digests and the mise tool versions current — the
+  last of these is why it rather than Dependabot, which has no mise manager and would leave the
+  gates themselves unversioned. It runs as the hosted app, so no write-scoped token is stored
+  in this repository. Updates are batched to one weekly window and three open pull requests,
+  because every one of them costs a full `check` run and a maintainer who reads it; a
+  vulnerability alert is exempt from that window. **Not yet installed on the repository**, so
+  nothing updates anything today and the digests above were pinned by hand — `TODO.md` P4.
 - Commits use the GitHub no-reply address; no personal e-mail appears in history.
 
 ## Consequences
