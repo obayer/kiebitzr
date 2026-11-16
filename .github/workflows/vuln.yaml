@@ -1,0 +1,70 @@
+name: vuln
+
+# govulncheck on a schedule, because the gate in `ci` only answers when somebody pushes.
+#
+# The advisory database moves without this repository moving, so a quiet fortnight is a
+# fortnight unchecked — and `.vulnguard.yaml` makes that concrete: an accepted exception carries
+# a review date, and a date that passes unnoticed is exactly the silence this project is built
+# against. This job is what makes the date arrive.
+#
+# It deliberately runs one gate rather than `check`. On an unchanged tree nothing else can newly
+# fail: formatting, vet, lint, the tests and the licence notices all depend on the code, while
+# `vuln` depends on the world. A daily `check` would compile the 2000-package tree twice for an
+# answer that cannot have changed.
+on:
+  schedule:
+    # Not on the hour: scheduled runs queue worst there, and nothing here is time-critical to
+    # the minute.
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vuln:
+    runs-on: ubuntu-latest
+    # Cold, govulncheck compiles the dependency tree before it can analyse it. Warm it is a
+    # couple of minutes; the timeout has to clear the cold case so a cache miss is a slow run
+    # rather than a false alarm.
+    timeout-minutes: 45
+    env:
+      # govulncheck holds the SSA form of the whole tree at once and peaked at 7.52 GiB when
+      # this was measured on a 2-vCPU runner. GOMEMLIMIT buys headroom with CPU instead of
+      # letting the kernel reclaim, which surfaces as a cancelled job rather than a failure.
+      GOMEMLIMIT: 5GiB
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install_args: go go:golang.org/x/vuln/cmd/govulncheck
+
+      - name: Locate the Go caches
+        run: |
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=go-${{ runner.os }}-$(go env GOVERSION)-${{ hashFiles('go.sum') }}" >> "$GITHUB_ENV"
+          echo "CACHE_PREFIX=go-${{ runner.os }}-$(go env GOVERSION)-" >> "$GITHUB_ENV"
+
+      # Restore only, and never save. The key is the one `ci` writes, so this job rides along on
+      # a warm cache without competing for the 10 GB a repository gets — a daily writer would
+      # evict the entry the pull requests depend on.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}/cache/download
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ env.CACHE_PREFIX }}
+            go-${{ runner.os }}-
+
+      - name: Download modules
+        run: go mod download
+
+      # Reachable findings fail unless `.vulnguard.yaml` accepts them with a reason and a review
+      # date; an expired date fails too, which is the second thing this schedule is for.
+      - name: vuln
+        run: mise run vuln

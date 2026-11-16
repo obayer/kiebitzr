@@ -50,6 +50,20 @@ jobs:
         with:
           install_args: go ko
 
+      # The scheduled rebuild is the one path that would otherwise sign without any gate having
+      # run. A tag push cannot reach here unchecked — `mise run release` refuses a commit that
+      # is not on origin/main, where `ci` has run — but a weekly rebuild of an unchanged tag has
+      # no fresh verdict, and its whole purpose is that the world changed since the tag. So the
+      # one gate that can newly fail on unchanged code runs first, and a vulnerable tree is not
+      # rebuilt and not signed.
+      - name: Refuse to rebuild a vulnerable tree
+        if: github.event_name == 'schedule'
+        env:
+          GOMEMLIMIT: 5GiB
+        run: |
+          mise install 'go:golang.org/x/vuln/cmd/govulncheck'
+          mise run vuln
+
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Log in to ghcr.io

@@ -63,9 +63,20 @@ single home: one private GitHub repository. There is no mirror elsewhere.
   signer's e-mail to the public transparency log). The CI identity itself — repository and
   workflow path — is public in that log as well; accepted.
 - CI on every push and pull request: `gofumpt`, `go vet`, `golangci-lint`, tests with the race
-  detector, `govulncheck`, `betterleaks`.
+  detector, `govulncheck`, the third-party notices, `betterleaks`.
+- **`govulncheck` daily on a schedule as well**, in a workflow of its own. The other gates
+  answer questions about the code and cannot change while the code does not; this one answers a
+  question about the world, and a repository that is quiet for a fortnight is unchecked for a
+  fortnight. It is also what makes a review date in `.vulnguard.yaml` arrive: an accepted
+  exception whose date passes unnoticed is the silence this service is built against. Restores
+  the shared cache and never writes it, so the daily run cannot evict what the pull requests
+  depend on.
 - **Weekly scheduled rebuild** of the latest release tag, so standard-library and base-image
-  fixes reach the image without a code change.
+  fixes reach the image without a code change — **with `govulncheck` in front of it**. This was
+  a hole: the rebuild selected the tag, built, pushed and signed with no gate at all, which is
+  precisely the path where the world has changed since the tag was checked. A tag push needs no
+  such gate, because `mise run release` refuses a commit that is not on `origin/main`, where CI
+  has run; the schedule has no fresh verdict and now takes one.
 - **Third-party license texts ship with the binary.** A statically linked Go binary contains
   its dependencies, and Apache-2.0, MIT and BSD all require the license text to accompany a
   *binary* distribution — an obligation on whoever publishes the image. The SBOM does not
