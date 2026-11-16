@@ -1,0 +1,349 @@
+# Strict, but deliberately idiomatic: every linter here either finds bugs or enforces a rule
+# that Go itself documents (Effective Go, Go Code Review Comments, the Google Go style guide,
+# the practice of the standard library). Linters that merely encode one project's taste are
+# listed at the bottom with the reason they are off — that list is part of the decision, so
+# nobody has to rediscover it.
+#
+# Run `mise run fmt` to format and `mise run lint` to check.
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    # ── Bugs ──────────────────────────────────────────────────────────────────
+    - asasalint # []any passed to a variadic any
+    - bodyclose # an unclosed response body leaks a connection
+    - containedctx # a context stored in a struct outlives its request
+    - contextcheck # a function that drops the inherited context
+    - durationcheck # two durations multiplied
+    - errchkjson # types json cannot marshal, and checks that can be dropped
+    - errorlint # breaks errors.Is/As, e.g. == on a wrapped error
+    - exhaustive # a switch over an enum that forgets a case
+    - fatcontext # a context nested inside a loop
+    - forcetypeassert # an unchecked type assertion panics
+    - loggercheck # an slog call with an odd number of key-value arguments
+    - makezero # a slice made with a length and then appended to
+    - musttag # a struct that is marshalled without tags
+    - nilerr # returning nil after checking that err is not nil
+    - nilnesserr # checking err != nil and returning a different nil error
+    - nilnil # returning a nil value and a nil error at once
+    - noctx # an HTTP request without a context
+    - reassign # reassigning a package variable of another package
+    - recvcheck # a type with both pointer and value receivers
+    - rowserrcheck # an unchecked Rows.Err
+    - sqlclosecheck # unclosed sql.Rows / sql.Stmt
+    - wastedassign # an assignment that is never read
+    - zerologlint # kept so a future logging mistake is caught, costs nothing today
+
+    # ── Security ──────────────────────────────────────────────────────────────
+    - gosec # the usual suspects: file paths, permissions, weak crypto, subprocesses
+
+    # ── Correct, modern, idiomatic Go ──────────────────────────────────────────
+    - copyloopvar # a loop variable copied needlessly since Go 1.22
+    - exptostd # golang.org/x/exp functions that the standard library now has
+    - gocritic # a broad set of diagnostics; style tag deliberately not enabled
+    - gomoddirectives # no replace or exclude directives in go.mod
+    - intrange # `for i := range n` instead of a three-clause loop
+    - mirror # bytes/strings conversions that allocate for nothing
+    - modernize # the official x/tools suggestions for newer language features
+    - perfsprint # strconv instead of fmt.Sprintf, and fmt.Sprintf("%s", s)
+    - predeclared # a declaration shadowing a predeclared identifier
+    - unconvert # a conversion that converts nothing
+    - unparam # a parameter or result nobody uses
+    - usestdlibvars # http.MethodGet instead of "GET"
+
+    # ── Naming, documentation, structure: what Go documents about itself ──────
+    - dupword # a word repeated in a comment
+    - embeddedstructfieldcheck # embedded fields first, separated by a blank line
+    - errname # sentinel errors are ErrFoo, error types are FooError
+    - godoclint # doc comments follow Go's doc conventions
+    - gochecknoinits # no init(): package state that appears from nowhere
+    - iface # an interface that is identical to another, or used nowhere
+    - inamedparam # interface method parameters are named, so the interface reads
+    - interfacebloat # an interface with too many methods is not an abstraction
+    - iotamixing # iota mixed with explicit values in one const block
+    - nakedret # no naked returns at all (see settings)
+    - revive # the documented naming, doc comment and control flow conventions
+    - whitespace # leading and trailing blank lines inside a block
+
+    # ── Project rules ─────────────────────────────────────────────────────────
+    - depguard # keeps Syft and Grype encapsulated, keeps `log` out
+    - forbidigo # the service logs, it never prints
+    - goconst # the same string literal three times is a constant
+    - importas # one spelling per imported package
+    - nolintlint # a nolint without a reason and a linter name is not allowed
+    - promlinter # Prometheus metric and label naming, via promlint
+    - sloglint # one style of slog call throughout
+    - wrapcheck # an error from another module is wrapped before it travels
+
+    # ── Tests ─────────────────────────────────────────────────────────────────
+    - testableexamples # an Example without expected output tests nothing
+    - thelper # a test helper calls t.Helper()
+    - tparallel # t.Parallel() used inconsistently between test and subtests
+    - usetesting # t.Context, t.Setenv, t.TempDir instead of hand-rolled versions
+
+  settings:
+    errcheck:
+      # A type assertion that is not checked panics, so it has to be checked.
+      check-type-assertions: true
+      # `_ = f()` stays allowed: it is Go's documented way of saying "the error here is
+      # deliberately dropped", and every use of it in this repository is a deferred Close.
+      check-blank: false
+
+    govet:
+      enable-all: true
+      disable:
+        # Field order by padding is a micro-optimisation; grouping fields by meaning is
+        # worth more than the few bytes, and nothing here is allocated in bulk.
+        - fieldalignment
+        # `if err := f(); err != nil` shadows an outer err by design — that is what the
+        # statement's init clause is for, and it is the form Effective Go uses. Keeping this
+        # check on would mean banning the most common line in Go.
+        - shadow
+
+    staticcheck:
+      # Everything, except the checks whose subject belongs to revive below. Having two
+      # linters report the same naming or doc comment issue only trains people to skim.
+      checks:
+        - all
+        - -ST1000 # package comment form — revive: package-comments
+        - -ST1003 # naming — revive: var-naming
+        - -ST1016 # receiver name consistency — revive: receiver-naming, recvcheck
+        - -ST1020 # comment on exported function — revive: exported
+        - -ST1021 # comment on exported type — revive: exported
+        - -ST1022 # comment on exported variable — revive: exported
+
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: blank-imports # a blank import needs a comment saying why
+        - name: context-as-argument # context.Context is the first parameter
+        - name: context-keys-type # no basic types as context keys
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return # the error is the last result
+        - name: error-strings # not capitalised, no trailing punctuation
+        - name: errorf # fmt.Errorf instead of errors.New(fmt.Sprintf(...))
+        - name: exported # exported identifiers are documented, and read well
+          arguments:
+            - checkPrivateReceivers
+            - sayRepetitiveInsteadOfStutters
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow # handle the error and return, do not else
+        - name: modifies-value-receiver
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: string-of-int
+        - name: superfluous-else
+        - name: time-naming # a duration field is named ...Duration, not ...Time
+        - name: unconditional-recursion
+        - name: unexported-return # an exported function does not return an unexported type
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: useless-break
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+
+    exhaustive:
+      # A switch with a default has decided what to do about the rest.
+      default-signifies-exhaustive: true
+
+    nakedret:
+      # Zero: a naked return is never clearer than naming what comes back.
+      max-func-lines: 0
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+      # Repeated literals in table tests are the test data, not a missing constant.
+      ignore-tests: true
+
+    gocritic:
+      # diagnostic finds bugs, performance finds waste. The style tag is a grab bag of one
+      # project's preferences and is left out on purpose.
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # Both measure struct size and nothing else. They fire on config structs and on
+        # Kubernetes and Grype values (112–512 bytes) in loops that run over hundreds of
+        # items, not millions. Taking the advice would mean pointers into loop bodies and
+        # pointer receivers on value types — more aliasing for copies that do not show up in
+        # a profile. Go's own advice is to pass by value until it measurably hurts.
+        - hugeParam
+        - rangeValCopy
+
+    sloglint:
+      no-mixed-args: true # either key-value pairs or attributes, not both in one call
+      static-msg: true # the message is a constant, the variables are the arguments
+      key-naming-case: snake # one spelling for a key that ends up in a log index
+
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/obayer/kiebitzr/*
+
+    importas:
+      # Imports that are aliased must use the same alias everywhere.
+      alias:
+        - pkg: k8s.io/api/core/v1
+          alias: corev1
+        - pkg: k8s.io/apimachinery/pkg/apis/meta/v1
+          alias: metav1
+        - pkg: k8s.io/client-go/kubernetes/typed/core/v1
+          alias: corev1client
+        - pkg: github.com/anchore/grype/grype/match
+          alias: grypematch
+        - pkg: github.com/anchore/grype/grype/pkg
+          alias: grypepkg
+        - pkg: github.com/anchore/syft/syft/pkg
+          alias: syftpkg
+        - pkg: github.com/anchore/grype/grype/db/v6/distribution
+          alias: v6dist
+        - pkg: github.com/anchore/grype/grype/db/v6/installation
+          alias: v6inst
+
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: the service writes structured logs; use the slog logger
+        - pattern: ^print(ln)?$
+          msg: the service writes structured logs; use the slog logger
+        # The standard log package writes unstructured lines and its Fatal variants call
+        # os.Exit, which skips every defer. Matched as identifiers rather than as an import,
+        # because denying the `log` import would deny `log/slog` with it.
+        - pattern: ^log\.(Print|Fatal|Panic)(f|ln)?$
+          msg: the service writes structured logs; use the slog logger
+
+    depguard:
+      rules:
+        # Syft and Grype are half of the binary (see the size measurements). They stay behind
+        # internal/catalog and internal/vulndb, so the rest of the service keeps compiling,
+        # testing and reading without them.
+        scanner-libraries:
+          files:
+            - $all
+            - "!**/internal/catalog/*.go"
+            - "!**/internal/vulndb/*.go"
+          deny:
+            - pkg: github.com/anchore/syft
+              desc: Syft belongs behind internal/catalog
+            - pkg: github.com/anchore/grype
+              desc: Grype belongs behind internal/vulndb
+            - pkg: github.com/anchore/stereoscope
+              desc: image handling belongs behind internal/catalog
+
+        # internal/upgrade is the one place in the *service* that talks to a registry for
+        # metadata rather than for an image, and the reference, platform and manifest types
+        # come with it. Fenced for the same reason as the scanner libraries: so the rest of
+        # the service keeps reading without them.
+        #
+        # The integration tests of internal/catalog and internal/runner are exempt. They
+        # resolve a real image reference to pin down what they are about to catalogue, which
+        # is the registry client used as a test fixture rather than as service code — and they
+        # only exist under the `integration` tag in the first place.
+        #
+        # What is fenced is reaching a registry and the types that come with it, not the
+        # vocabulary of image references: `pkg/name` parses a reference string and touches
+        # neither the network nor a credential, and more than one part of the service has to
+        # understand what `nginx:1.2` and `index.docker.io/library/nginx:1.2` have in common
+        # (ADR 0013). Denying the client packages by name keeps the guard on what it is for
+        # — a new package cannot start talking to a registry — while a pure parser stays
+        # available where references are handled.
+        registry-client:
+          files:
+            - $all
+            - "!**/internal/upgrade/*.go"
+            - "!**/internal/catalog/integration_test.go"
+            - "!**/internal/runner/integration_test.go"
+          deny:
+            - pkg: github.com/google/go-containerregistry/pkg/v1
+              desc: registry lookups and manifest types belong behind internal/upgrade
+            - pkg: github.com/google/go-containerregistry/pkg/authn
+              desc: registry credentials belong behind internal/upgrade and internal/catalog
+
+  exclusions:
+    # No presets: a preset hides whole classes of findings, and which ones is not visible
+    # here. Every exclusion in this repository is written out with its reason.
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec # test fixtures are not an attack surface
+          - noctx # a test does not need a context to make its point
+          - wrapcheck # a test reports its error, it does not pass it on
+          - forcetypeassert # a failed assertion in a test is a failed test
+          - containedctx # a test harness may carry a context
+      # A fake that stands in for an interface implements that interface's signature,
+      # including the parameters it has no use for.
+      - path: _test\.go
+        linters: [revive]
+        text: unused-parameter
+
+formatters:
+  enable:
+    - gofumpt # a strict superset of gofmt: it only removes freedom, never adds disagreement
+    - gci # import groups in one fixed order, so no two files differ
+  settings:
+    gofumpt:
+      module-path: github.com/obayer/kiebitzr
+      # The experimental rules too. Both are mechanical: one groups repeated parameter
+      # types, the other names the results a naked return would leave implicit.
+      extra:
+        group-params: true
+        clothe-returns: true
+    gci:
+      sections:
+        - standard # the standard library
+        - default # everything from other modules
+        - prefix(github.com/obayer/kiebitzr) # our own packages, last
+      custom-order: true
+# ── Deliberately not enabled ──────────────────────────────────────────────────
+#
+# These are the linters a "strict" configuration usually reaches for, and the reason each one
+# is wrong for Go rather than merely inconvenient:
+#
+#   wsl_v5, nlreturn, whitespace beyond blocks — prescribe blank lines between statements.
+#       gofumpt already settles every blank line that has a right answer; the rest is reading
+#       rhythm, and no two Go files in the standard library agree on it.
+#   noinlineerr — forbids `if err := f(); err != nil`, which is the form Effective Go uses
+#       and the reason the statement has an init clause at all.
+#   varnamelen — demands long names. `i`, `r`, `w`, `db`, `ok` are Go's own vocabulary; Go
+#       Code Review Comments ties name length to scope, which is the opposite rule.
+#   lll, golines — a fixed line length. Go Code Review Comments states there is no line
+#       limit; gofmt never wraps, and a tabwidth makes any column count a guess.
+#   nonamedreturns — named results are what make `defer func() { err = ... }()` work, and
+#       that pattern is how a deferred Close reports its error. Used in internal/catalog.
+#   exhaustruct — every struct field must be set. Go's zero values are a language feature;
+#       this turns each new field into a change in every caller.
+#   ireturn — "return concrete types" is sound advice, but vulndb.Open returns an interface
+#       on purpose, so the run loop can be tested without a vulnerability database.
+#   gochecknoglobals — package-level `var` is how Prometheus descriptors, compiled regexps
+#       and sentinel errors are declared, in this repository and in the standard library.
+#   funlen, gocyclo, gocognit, cyclop, maintidx, nestif, dupl — thresholds, not conventions.
+#       They encode a number nobody can defend and are answered by revive's early-return and
+#       indent-error-flow, which fix the shape instead of counting it.
+#   mnd — magic numbers. Ports, timeouts and permissions are clearer in place than behind a
+#       constant that only repeats the literal.
+#   testpackage — only black-box tests. The tests here cover unexported logic on purpose
+#       (splitImageID, policy.findings, stripHashSuffix), as the standard library does.
+#   paralleltest — requires t.Parallel() everywhere. Parallelism is a property of the test,
+#       not a rule; tparallel (enabled) catches the mistakes that actually hurt.
+#   err113 — every error must be a sentinel. fmt.Errorf with %w is the documented way to add
+#       context, and callers here match on behaviour, not identity.
+#   godox — forbids TODO. A TODO with a reason is better than the same gap left silent.
+#   prealloc — advice about allocations, not correctness; it fires on loops where the length
+#       is unknown and is already followed where it matters.
+#   gocritic's style tag — a mixed bag (singleCaseSwitch, ifElseChain) that contradicts the
+#       diagnostic checks often enough to be noise. The other two tags are enabled.

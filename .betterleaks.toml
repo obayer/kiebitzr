@@ -1,0 +1,59 @@
+# betterleaks configuration — the secret-scanning gates in mise.toml all read this file, and
+# every one of them names it with `--config`. That is not decoration: betterleaks ignores a
+# config found in the scanned directory unless `--unsafe-auto-load-config` is given, so a
+# gate that forgets the flag runs on the built-in rules with no allowlist at all — green, and
+# reporting the very files below.
+#
+# `betterleaks dir` walks the filesystem and does NOT honour .gitignore, so the working-tree
+# scan would otherwise report the very files that exist to hold personal tokens. Everything
+# allowlisted here is git-ignored and therefore cannot reach the repository anyway; the
+# git-history gate (`secrets:history`) scans committed content, where these paths never
+# appear.
+#
+# betterleaks documents `[[allowlists]]` as deprecated and asks new configs to use an Expr
+# `prefilter` instead. Measured on 1.10.0, that advice does not hold here: a global
+# `prefilter` has no effect on a `dir` scan at all. With `matchesAny(attributes["path"], …)`
+# — and also with `^`, which matches even an empty path — the scan still read 116 MB and
+# reported all 8 findings, while the allowlists below bring it to 3 MB and 0. The path
+# attribute appears not to reach a filesystem fragment's prefilter. So this stays on the
+# deprecated form until a release makes the replacement work, because a suppression that
+# silently does nothing is the one failure mode a secret gate must not have. Re-measure the
+# prefilter on the next upgrade, and when moving to 2.x, where allowlists are gone.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Git-ignored local settings and notes — the documented home for personal tokens, for the sandbox profile and agent configuration, and for measurements taken on a real installation"
+paths = [
+  '''(^|/)mise\.local\.toml$''',
+  '''(^|/)\.mise\.local\.toml$''',
+  '''(^|/)\.nono/''',
+  '''(^|/)\.claude/''',
+  '''(^|/)notes/''',
+]
+
+[[allowlists]]
+description = "Git-ignored build output, dependencies and scanner data. Anchored exactly like .gitignore: /bin/ and /dist/ are top-level only, so the vendored tools/claude-frontmatter/dist/ stays in scope"
+paths = [
+  '''(^|/)node_modules/''',
+  '''^bin/''',
+  '''^dist/''',
+  '''(^|/)sboms/''',
+  '''(^|/)grype-db/''',
+  '''\.sbom\.json$''',
+]
+
+# betterleaks' built-in rules are broader than the gitleaks set this repository used before,
+# and `generic-credential-uri` reads the fixture of the test that asserts a credential in
+# -matcher-url is redacted before it is logged. Scoped to that rule, that file and that
+# secret with `condition = "AND"`, so the rule keeps working everywhere else and the file
+# stays scanned for everything else.
+[[rules]]
+id = "generic-credential-uri"
+
+[[rules.allowlists]]
+description = "The fixture of TestLogAttrsRedactsCredentialsInTheMatcherURL — a fake credential that exists to prove it gets redacted"
+condition = "AND"
+paths = ['''^internal/config/config_test\.go$''']
+regexes = ['''^secret$''']

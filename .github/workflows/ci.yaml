@@ -1,0 +1,164 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A superseded pull-request run must not keep a runner busy. In a public repository the
+# minutes are free but the concurrency is not, and a repository anybody can open a pull
+# request against is exactly where a queue of stale runs forms. Runs on main are never
+# cancelled, because they are the ones that populate the shared cache — cancelling one costs
+# far more than it saves.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Every figure in this job was measured on a private repository's standard runner: 2
+    # vCPUs and 8 GB. A public repository gets a larger one (4 vCPUs and 16 GB at the time
+    # of writing), so the limits below are now headroom rather than necessity — they are
+    # kept until somebody re-measures, because being wrong in this direction costs a slow
+    # run and being wrong in the other costs a runner that dies undiagnosably.
+    #
+    # Cold, the gates compile the full 2000-package dependency tree once per build
+    # configuration on those two cores; golangci-lint alone measured 818 s. Warm, the whole
+    # run is a few minutes. The timeout has to clear the cold case, because a run that is
+    # cancelled before the cache is written leaves the next run cold as well.
+    timeout-minutes: 75
+    env:
+      # Peak resident set per gate, measured locally with warm caches:
+      #
+      #   vuln 7.52 GiB · test:dev 1.68 · test 1.67 · lint 0.15 · vet 0.13 · rest 0.07
+      #
+      # govulncheck is the whole problem — it holds the SSA form of the entire dependency
+      # tree at once, and 7.52 GiB does not fit in a runner with 7 GB. That is what kills
+      # this job: the kernel reclaims, the runner goes unhealthy, and the step is reported
+      # `cancelled` rather than failed. Serialising the gates (`--jobs 1`, now the loop
+      # below) was never going to help, because the peak belongs to one process.
+      #
+      # GOMEMLIMIT is a soft limit the Go runtime honours by collecting more aggressively
+      # instead of growing the heap, so it buys headroom with CPU. It is set for the whole
+      # job because no other gate comes near it — the race builds peak at 1.7 GiB. If
+      # govulncheck's live heap genuinely needs more than this, the GC will thrash rather
+      # than die, which shows up as a slow run inside the 75 minute timeout and in the
+      # annotations below; the next lever would then be giving `vuln` a runner of its own.
+      GOMEMLIMIT: 5GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `check` includes secrets:history, which scans every commit — a shallow clone
+          # would silently scan almost nothing.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: go golangci-lint go:golang.org/x/vuln/cmd/govulncheck betterleaks
+
+      - name: Locate the Go caches
+        run: |
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=go-${{ runner.os }}-$(go env GOVERSION)-${{ hashFiles('go.sum') }}" >> "$GITHUB_ENV"
+          echo "CACHE_PREFIX=go-${{ runner.os }}-$(go env GOVERSION)-" >> "$GITHUB_ENV"
+
+      # mise-action caches the pinned tools, not the Go caches, and the compiled objects in
+      # GOCACHE are what actually costs the time here.
+      #
+      # restore and save are deliberately separate actions. The combined actions/cache
+      # writes its cache in a post step that only runs when the job succeeds (its
+      # `save-always` input is deprecated and does not fire), so every cancelled run saved
+      # nothing and the next one started cold again — the loop this job was caught in.
+      # Only the downloaded module zips are cached, not the 5 GB of extracted modules:
+      # `go mod download` re-extracts them without network, and the cache has to stay well
+      # inside the 10 GB a repository gets and be writable within the grace period a
+      # cancelled job is given.
+      - uses: actions/cache/restore@v4
+        id: go-cache
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}/cache/download
+            ~/.cache/golangci-lint
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: |
+            ${{ env.CACHE_PREFIX }}
+            go-${{ runner.os }}-
+
+      - name: Download modules
+        run: go mod download
+
+      # A runner has about 14 GB free, and this tree needs 5.9 GB of module cache plus
+      # several GB of compiled objects — then the save step tars those up on the same
+      # disk. A full disk makes the runner unhealthy, which surfaces as a cancelled job
+      # and not as an error, so record the headroom on both sides of the gates.
+      - name: Disk headroom
+        run: df -h / "$GOCACHE" "$GOMODCACHE" | sort -u
+
+      - name: check
+        # One gate at a time, because go build already saturates both cores: concurrent
+        # gates only compile the same tree repeatedly and stack their peak memory.
+        #
+        # The loop replaces `mise run --jobs 1 check` to make a dying runner diagnosable.
+        # When memory runs out the job is force-terminated rather than failed: the step
+        # is reported `cancelled`, and every later step is skipped — `if: always()`
+        # included, which is why the headroom recorded after the gates never survives.
+        # So the evidence has to leave the runner while the gates still run. Workflow
+        # commands are delivered to the API as annotations as they are printed, and
+        # annotations survive the termination. GitHub keeps ten per level per step, hence
+        # the split: `notice` carries the eight gate markers, `warning` the headroom, and
+        # the latter is emitted only when a threshold is crossed rather than on a timer.
+        #
+        # The gate list comes from the `check` task itself, so the two cannot drift apart.
+        run: |
+          (
+            while sleep 30; do
+              mem=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
+              disk=$(df -m --output=avail / | tail -1 | tr -d ' ')
+              if [ "$mem" -lt 1024 ]; then
+                echo "::warning title=low memory::${mem} MiB available, ${disk} MiB free on /"
+              fi
+              if [ "$disk" -lt 3072 ]; then
+                echo "::warning title=low disk::${disk} MiB free on /, ${mem} MiB available"
+              fi
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null' EXIT
+
+          # Read into a variable first: inside `for` the substitution's exit status is
+          # lost, and an empty list would run no gate at all and report success.
+          gates=$(mise task info check --json | jq -r '.depends[]')
+          if [ -z "$gates" ]; then
+            echo "::error::could not read the gate list from the check task"
+            exit 1
+          fi
+
+          for gate in $gates; do
+            echo "::notice title=gate::${gate}"
+            mise run "$gate"
+          done
+
+      - name: Cache size and disk headroom before saving
+        if: always()
+        run: |
+          du -sh "$GOCACHE" "$GOMODCACHE/cache/download" ~/.cache/golangci-lint 2>/dev/null || true
+          df -h /
+
+      - uses: actions/cache/save@v4
+        # Save whatever was compiled even when a gate failed or the job ran out of time,
+        # so the next run starts warm and the cold cost is paid once, not every time.
+        # Skipped when the exact key was restored: an existing key cannot be overwritten,
+        # so re-uploading gigabytes would only be discarded.
+        if: always() && steps.go-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}/cache/download
+            ~/.cache/golangci-lint
+          key: ${{ env.CACHE_KEY }}

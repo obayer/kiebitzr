@@ -1,0 +1,34 @@
+/bin/
+/dist/
+# Local SBOM cache and vulnerability database of `mise run dev`.
+/.cache/
+node_modules/
+*.test
+*.out
+coverage.*
+
+# Personal, machine-local settings (CLAUDE_CONFIG_DIR, tokens, extra tools).
+mise.local.toml
+.mise.local.toml
+
+# The agent sandbox profile and the agent's own configuration. Both describe one machine
+# rather than the service: which paths a session may write, where its credentials are kept,
+# which hooks run locally. A profile is passed to `mise run claude` by path, so nothing in
+# this repository needs them to exist — see CONTRIBUTING.md.
+.nono/
+.claude/
+
+# Measurements, reports and notes from a real installation. These name clusters, namespaces,
+# workloads and the versions they run, which the hard rule in CLAUDE.md keeps out of this
+# repository. The documents here cite their *findings* in neutral form; the raw record of
+# where a number came from stays local.
+notes/
+feedback.md
+feedback-*.md
+
+# Scanner data that must never be committed.
+*.sbom.json
+sboms/
+grype-db/
+
+.DS_Store

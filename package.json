@@ -1,0 +1,7 @@
+{
+  "name": "kiebitzr-docs-tooling",
+  "private": true,
+  "devDependencies": {
+    "claude-frontmatter": "file:tools/claude-frontmatter"
+  }
+}

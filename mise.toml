@@ -1,0 +1,320 @@
+# Only what the gates need, because mise installs every tool listed here before *any* task
+# runs. A tool that serves a single task is declared on that task instead (`tools = { … }`),
+# so it is fetched when that task runs and never on a CI runner that only runs `check`.
+[tools]
+go = "1.27.4"
+golangci-lint = "2.15.0"
+# Must stay the version golangci-lint 2.15.0 links (`go version -m $(which golangci-lint)`),
+# otherwise an editor formatting on save and `mise run fmt` disagree about the same file. The
+# repo tasks go through golangci-lint; this binary exists for editors and ad-hoc use.
+gofumpt = "0.12.0"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.9.0"
+# The secret scanner, from the people who wrote gitleaks. Pinned to the 1.x line: 2.x is
+# still the development branch upstream, and the registry resolves `latest` to 1.x too.
+betterleaks = "1.10.0"
+jq = "1.8.2"
+# The exception to the rule above, and not because a gate needs it: where the optional agent
+# sandbox is used, `gh` is a policy-controlled command and has to resolve through the
+# sandbox's shim. A task-scoped tool would not — mise prepends a task's tool directory ahead
+# of the shim, and the exec is then denied as a bypass. Declared here, it sits behind the shim
+# on the session PATH, where mediation works.
+gh = "2.103.3"
+# The second exception, for the same reason in a different place: the release workflow calls
+# `ko` directly rather than through a task, so the version has to be active on the PATH. While
+# this was declared on `[tasks.image]`, mise installed the binary and left the shim without a
+# version — `mise ERROR No version is set for shim: ko` — which failed the first release at the
+# ghcr login, before anything was built. A tool a workflow invokes by name belongs here.
+ko = "0.18.0"
+# Docs tooling: the vendored frontmatter tools are `#!/usr/bin/env node` scripts, which
+# resolve through mise's shim — an unpinned node breaks the frontmatter-lint Stop hook.
+node = "26.13.0"
+# The sandbox (`nono`) is deliberately *not* declared here. It is a property of a machine, not
+# of this repository: it needs a profile describing that machine's paths and credentials, and
+# both the profile and the tool therefore live outside the repository — declare
+# `nono = "<version>"` in the git-ignored `mise.local.toml`. The `claude` tasks detect it.
+"go:golang.org/x/tools/gopls" = "0.24.0"
+"aqua:go-delve/delve" = "1.27.2"
+
+[env]
+GOTOOLCHAIN = "local"
+CGO_ENABLED = "0"
+VERSION = "dev"   # read by .ko.yaml ldflags; CI sets the release tag
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+[tasks.setup]
+description = "Install everything needed to work on the repo: pinned tools from this file, the vendored docs tooling and the pre-commit hook (staged secret scan and commit identity). Run once after cloning and after a tool version bump — the hook is not versioned, so a fresh clone has neither gate until this has run"
+depends_post = ["hooks:install"]
+run = ["mise install", "npm ci --no-audit --no-fund"]
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+
+[tasks.fmt]
+description = "Rewrite all Go files in place: gofumpt (a strict superset of gofmt) plus fixed import groups. Driven through golangci-lint so formatting and linting can never disagree about a file. Run after editing Go code; `check` only reports, it does not fix"
+run = "golangci-lint fmt"
+
+[tasks."fmt:check"]
+description = "Print the diff for every Go file that is not formatted and fail if there is one. Part of `check`; fix with `mise run fmt`"
+run = "golangci-lint fmt --diff"
+
+[tasks.vet]
+description = "Run go vet on all packages: suspicious constructs the compiler accepts (printf args, struct tags, copied locks). Runs over all three build configurations — release, `dev` and `integration` — so a path that is not built by default cannot rot unnoticed. Part of `check`"
+run = ["go vet ./...", "go vet -tags dev ./...", "go vet -tags integration ./..."]
+
+[tasks.lint]
+description = "Run golangci-lint with the repo config (.golangci.yaml says what is enabled and what is deliberately not). Runs twice, because build tags decide which files exist: once for the release build, once with `dev,integration`. Part of `check`"
+run = ["golangci-lint run ./...", "golangci-lint run --build-tags dev,integration ./..."]
+
+[tasks.test]
+description = "Run all unit tests with the race detector and without the test cache, in the release build configuration — what ships is what is tested. Part of `check`"
+env = { CGO_ENABLED = "1" }
+run = "go test -race -count=1 ./..."
+
+[tasks."test:dev"]
+description = "Run the unit tests in the `dev` build configuration, where the kubeconfig path exists. Part of `check`, because that path is only compiled with the tag"
+env = { CGO_ENABLED = "1" }
+run = "go test -tags dev -race -count=1 ./..."
+
+[tasks."test:integration"]
+description = "Run the tests that talk to the real world: catalogue an image from a registry with Syft and match it against the real vulnerability database. Needs network to the registry and to grype.anchore.io, downloads the database (hundreds of MB) and reports how long a cold run takes — the measurement ADR 0001 asks for. Not part of `check`. Override the subject with KIEBITZR_TEST_IMAGE and KIEBITZR_TEST_PLATFORM"
+run = "go test -tags integration -count=1 -timeout 30m -v ./..."
+
+[tasks.vuln]
+description = "Report known Go vulnerabilities that are reachable from this code (stdlib and modules), via govulncheck. Reachable findings fail unless `.vulnguard.yaml` accepts them with a reason and a review date — govulncheck has no such mechanism, and a transitive vulnerability without an upstream fix would otherwise keep the gate red forever. Needs network to vuln.go.dev. Part of `check`"
+run = "go run ./tools/vulnguard"
+
+[tasks.secrets]
+description = "Scan the working tree for secrets (tokens, keys, credentials) with betterleaks, skipping the git-ignored local paths named in .betterleaks.toml. Part of `check`; catches a credential before it is even staged"
+run = "betterleaks dir --config .betterleaks.toml --no-banner --redact ."
+
+[tasks."secrets:staged"]
+description = "Scan only what is staged for the next commit. What the pre-commit hook runs (see `secrets:hook`); use directly to check a commit you are about to make"
+run = "betterleaks git --staged --config .betterleaks.toml --no-banner --redact ."
+
+[tasks."secrets:history"]
+description = "Scan every commit in the history for credentials, not just the current files. The gate that keeps secrets out of the repository: a credential committed and deleted again stays in the history and only this finds it. Part of `check`; needs the full history, not a shallow clone"
+run = "betterleaks git --config .betterleaks.toml --no-banner --redact ."
+
+[tasks.identity]
+description = "Check that the author and committer address git would use has committed to this repository before, and refuse a new one unless IDENTITYGUARD_ALLOW_NEW=1 says it is deliberate. Why it exists: a repository-local user.email lives in .git/config, which no clone and no worktree inherits, so a checkout silently falls back to the global identity and publishes it. Deliberately not part of `check`: a first contribution is new by definition, and a gate that fails every newcomer's pull request gets removed rather than heeded — it belongs in the pre-commit hook, where the commit can still be prevented"
+run = "go run ./tools/identityguard"
+
+[tasks.precommit]
+description = "What the pre-commit hook runs: the staged secret scan and the commit identity check. Call it directly to see what the hook would say about the commit you are about to make"
+depends = ["identity", "secrets:staged"]
+
+[tasks."hooks:install"]
+description = "Install the git pre-commit hook that runs `precommit`, so a credential or a foreign commit identity is rejected before it ever becomes a commit. Runs as part of `setup`; the hook lives in .git/hooks and is not versioned, which is why it has to be installed rather than checked in"
+run = "mise generate git-pre-commit --hook pre-commit --task precommit --write"
+
+[tasks.check]
+description = "Run every gate CI runs: format, vet, lint, tests in both build configurations, govulncheck, secret scan of both the working tree and the git history. Run before every commit; a green check locally means a green CI"
+depends = ["fmt:check", "vet", "lint", "test", "test:dev", "vuln", "secrets", "secrets:history"]
+
+[tasks.build]
+description = "Build the kiebitzr binary for the current platform into bin/ (static, CGO off) with the `dev` tag, so -kubeconfig works and the binary can be pointed at a cluster from here. For local runs only — this is not what is released"
+run = "go build -tags dev -trimpath -o bin/kiebitzr ./cmd/kiebitzr"
+
+[tasks."build:release"]
+description = "Build exactly what CI releases: no `dev` tag, so neither the -kubeconfig flag nor the kubeconfig loader is in the binary, and stripped like the image. Use to confirm the release build compiles and to see its size"
+run = "go build -trimpath -ldflags='-s -w' -o bin/kiebitzr-release ./cmd/kiebitzr"
+
+[tasks.dev]
+description = "Run the dev build against whatever cluster your kubeconfig points at: SBOM cache and vulnerability database under ./.cache (git-ignored), metrics on 127.0.0.1:8080, ten-minute interval. Needs network to the registries of the running images and to grype.anchore.io. The first run is the slow one — every digest is catalogued and the database is downloaded"
+depends = ["build"]
+run = "./bin/kiebitzr -cache-dir ./.cache/kiebitzr -listen 127.0.0.1:8080 -interval 10m"
+
+[tasks.image]
+description = "Build the container image with ko into the local Docker daemon, current platform only, nothing pushed. Use to test the image; releases are built and signed by CI. The version is `git describe`, so a locally built binary says which commit it is and whether the tree was dirty — it must be set, because the ldflags are no longer silently dropped (ADR 0002) and an unset VERSION would make the binary report an empty version instead"
+run = "VERSION=\"$(git describe --tags --always --dirty)\" ko build --local --bare ./cmd/kiebitzr"
+
+[tasks."image:tarball"]
+description = "Build the image for one platform into a tarball that a node's container runtime can import, to test a locally built image in a cluster with no registry in between. Writes bin/ and prints the import command, because the import itself runs on the node. Platform defaults to linux/arm64; pass another to override. Usage: mise run image:tarball [-- linux/amd64]"
+usage = 'arg "<platform>" default="linux/arm64"'
+# Three things this gets right that are easy to get wrong by hand:
+#
+# --platform, because .ko.yaml builds arm64 and amd64 and a node wants only its own; the
+# ghcr reference via --bare and --tags, so the image is named exactly as it would be when
+# released and only the tag in the Deployment changes; and `git describe` as that tag, so
+# what runs in the cluster says which commit it came from and whether the tree was dirty.
+#
+# The Deployment needs `imagePullPolicy: IfNotPresent` and must not use a `latest` tag —
+# `latest` defaults to `Always`, and the kubelet would go looking in a registry where this
+# image does not exist. An imported image also has no signature and no provenance: use it
+# to test, and let what stays in the cluster come from the release (ADR 0002).
+run = """
+version="$(git describe --tags --always --dirty)"
+out="bin/kiebitzr-$(echo "$usage_platform" | tr '/' '-').tar"
+mkdir -p bin
+VERSION="$version" KO_DOCKER_REPO=ghcr.io/obayer/kiebitzr \
+  ko build --bare --push=false --platform="$usage_platform" --tags "$version" --tarball="$out" ./cmd/kiebitzr
+echo
+echo "$out holds ghcr.io/obayer/kiebitzr:$version"
+echo
+echo "import it on the node, into the k8s.io namespace the kubelet reads:"
+echo "  sudo k3s ctr images import $out          # k3s"
+echo "  sudo ctr -n k8s.io images import $out    # plain containerd"
+echo
+echo "then point the overlay at it:"
+echo "  images:"
+echo "    - name: ghcr.io/obayer/kiebitzr"
+echo "      newTag: $version"
+"""
+
+# ── Release ───────────────────────────────────────────────────────────────────
+# There is deliberately no task that builds and pushes a release image. A keyless signature
+# made on a workstation publishes the signer's e-mail to the public transparency log, so
+# signing happens in CI only (ADR 0002). The only local step of a release is the tag.
+
+[tasks.release]
+description = "Cut a release: tag the current commit and push the tag, which is what starts the release workflow — CI then builds, pushes and signs the image. Refuses anything CI has not already checked: the tree must be clean and the commit must be on origin/main, because the release workflow does not run the gates itself. Versions are CalVer, vYYYY.MMDD.N, with N counting releases of the same day from zero (ADR 0006). Usage: mise run release -- v2026.1109.0 (the leading v is what the workflow triggers on)"
+usage = 'arg "<version>"'
+run = [
+    "git diff --exit-code --quiet",
+    "git diff --cached --exit-code --quiet",
+    "git fetch origin main --tags",
+    "git merge-base --is-ancestor HEAD origin/main",
+    "git tag -a \"$usage_version\" -m \"kiebitzr $usage_version\"",
+    "git push origin \"$usage_version\"",
+]
+
+[tasks.verify]
+description = "Verify that a published image really was built and signed by this repository's release workflow, by checking the keyless certificate identity and its OIDC issuer. Read-only, needs network to the registry and the transparency log. Usage: mise run verify -- v2026.1109.0, or a digest"
+usage = 'arg "<reference>"'
+tools = { cosign = "3.1.4" }
+run = """cosign verify ghcr.io/obayer/kiebitzr:$usage_reference \
+  --certificate-identity-regexp '^https://github.com/obayer/kiebitzr/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com"""
+
+# ── Docs ──────────────────────────────────────────────────────────────────────
+[tasks."setup:docs"]
+description = "Install the vendored frontmatter tools (lint, knowledge graph) if missing. Runs automatically before the docs tasks that need it"
+hide = true
+run = "test -x node_modules/.bin/frontmatter-kg || npm ci --no-audit --no-fund"
+
+# CLAUDE.md only says "mise tasks ls" — each description must therefore say what the task
+# answers, when to use it and how to call it.
+
+[tasks."docs:adrs"]
+depends = ["setup:docs"]
+description = "List all ADRs with id, status, title and tags. Start here for any design question (why is X built this way) and to find the next free ADR number"
+run = "node_modules/.bin/frontmatter-kg --root . | jq -r '.nodes[] | select(.id|test(\"^kbz:adr:[0-9]+$\")) | [.id, .status, .title, (.tags|join(\",\"))] | @tsv'"
+
+[tasks."docs:tag"]
+depends = ["setup:docs"]
+description = "List every document carrying a tag, with id, status, title and file — all decisions and runbooks on one topic. Usage: mise run docs:tag -- <tag>"
+usage = 'arg "<tag>"'
+run = "node_modules/.bin/frontmatter-kg --root . | jq -r --arg t \"$usage_tag\" '.nodes[] | select(.tags|index($t)) | [.id, .status, .title, .file] | @tsv'"
+
+[tasks."docs:refs"]
+depends = ["setup:docs"]
+description = "Show one document plus its incoming and outgoing links with reasons. Use before relying on an ADR: incoming links reveal amendments and superseding decisions. Usage: mise run docs:refs -- <id>"
+usage = 'arg "<id>"'
+run = "node_modules/.bin/frontmatter-kg --root . | jq -r --arg id \"$usage_id\" '(first(.nodes[] | select(.id==$id)) // error(\"unknown id\")) as $n | \"\\($n.id) [\\($n.status)] \\($n.title)  \\($n.file)\", \"incoming:\", (.edges[] | select(.to==$id) | \"  \\(.from) — \\(.reason // \"\")\"), \"outgoing:\", (.edges[] | select(.from==$id) | \"  \\(.to) — \\(.reason // \"\")\")'"
+
+[tasks."docs:find"]
+description = "Full-text search over all documents, case-insensitive, listing matching files. Use when the topic has no tag. Usage: mise run docs:find -- <keyword>"
+usage = 'arg "<keyword>"'
+run = "grep -rli --include='*.md' -- \"$usage_keyword\" docs/ || echo 'no matches'"
+
+[tasks."docs:summary"]
+depends = ["setup:docs"]
+description = "Overview of all documents grouped by type, with their links, orphans and broken related ids. Use to check the doc graph after adding or linking documents"
+run = "node_modules/.bin/frontmatter-kg --root . --summary"
+
+[tasks."docs:graph"]
+depends = ["setup:docs"]
+description = "Print the whole document graph as JSON { nodes: [id, title, status, date, tags, related, file], edges: [from, to, reason] }. Only for questions no other docs task answers"
+run = "node_modules/.bin/frontmatter-kg --root ."
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+# Plain `gh` calls, so they work with or without a sandbox. Where a sandbox profile mediates
+# `gh`, no secret enters the session: the credential is injected outside it and restricted to
+# this repository's Actions read endpoints. They deliberately use the jobs API rather than
+# `gh run view --log`, because the log endpoint redirects to a blob host a sandboxed session
+# typically may not reach.
+
+# The repository is not named here. `gh` derives it from the checkout's remote, and `gh api`
+# substitutes the `{owner}/{repo}` placeholders from the same place, so these tasks read
+# whichever fork they are run in rather than one hard-coded slug.
+#
+# A sandboxed session is the exception and needs the slug written out: a mediated `gh` runs
+# outside the session with its own filesystem policy, has no access to the working tree or the
+# git config, and `GH_REPO` does not cross that boundary either — so the derivation has nothing
+# to read. Override these three in `mise.local.toml` with the literal slug when running that
+# way; a task defined there replaces the one here.
+
+[tasks."ci:login"]
+description = "Sign gh in on this machine, which the ci:* tasks below need. Run it on the host rather than inside an agent sandbox: that is what puts the token where a sandbox's credential proxy can inject it supervisor-side, so the session itself never holds one. Needed once, and again when the token is revoked"
+run = "gh auth login"
+
+[tasks."ci:runs"]
+description = "List the recent CI runs of this checkout's repository with branch, status, conclusion, id and start time. Start here when a push went red: it says which run to inspect, and a second run on the same ref is how you spot one run cancelling another"
+run = "gh run list --limit 10"
+
+[tasks."ci:why"]
+description = "Show how one CI run ended step by step: each job with its status, then every step with its conclusion. This is what tells a cancelled run apart from a failed gate, and whether the cache was still saved. Usage: mise run ci:why -- <run-id> (the id comes from `ci:runs`)"
+usage = 'arg "<run-id>"'
+run = "gh api repos/{owner}/{repo}/actions/runs/$usage_run_id/jobs --jq '.jobs[] | ([.name, .status, .conclusion] | @tsv), (.steps[] | [\"  \" + (.number|tostring), .name, .conclusion] | @tsv)'"
+
+[tasks."ci:annotations"]
+description = "Show a run's annotations: the gate markers and the headroom warnings the job emitted while it ran. This is what survives a runner that dies instead of failing — `ci:why` then shows a step as cancelled and everything behind it as skipped, and the last gate marker here names what was running. Usage: mise run ci:annotations -- <run-id>"
+usage = 'arg "<run-id>"'
+run = """
+sha=$(gh api repos/{owner}/{repo}/actions/runs/$usage_run_id --jq .head_sha)
+# Without --jq here, a denied or failed request reports itself; piping it straight into jq
+# would turn an HTTP 403 into "cannot iterate over: null" and hide which layer refused.
+body=$(gh api repos/{owner}/{repo}/commits/$sha/check-runs) || exit 1
+for check_run in $(echo "$body" | jq -r '.check_runs[].id'); do
+  gh api repos/{owner}/{repo}/check-runs/$check_run/annotations \
+    --jq '.[] | [.annotation_level, .title, .message] | @tsv'
+done
+"""
+
+# ── Agent sandbox ─────────────────────────────────────────────────────────────
+# The sandbox is optional and its profile is not in the repository, because a profile
+# describes one machine: which paths a session may write, where its credentials live, which
+# hosts it may reach. Both tasks below therefore resolve it the same way, and the rule is
+# deliberately asymmetric:
+#
+#   nono absent              → run unsandboxed, and say so
+#   nono present, no profile → refuse
+#
+# An installed sandbox that is silently not used is the failure worth preventing. The variable
+# belongs in the git-ignored `mise.local.toml`, next to the `nono` version itself:
+#
+#   [env]
+#   KBZ_SANDBOX_PROFILE = "{{config_root}}/.nono/dev.json"
+
+[tasks.claude]
+description = "Start Claude Code, inside the sandbox when one is installed: repo read-write, network limited to what a session needs. Needs KBZ_SANDBOX_PROFILE pointing at a profile whenever `nono` is on the PATH, and refuses to start without it; with no sandbox installed it runs Claude Code directly. `--trust-proxy-ca` is what lets a mediated `gh` talk to the GitHub API: the credential proxy terminates TLS, and a Go CLI rejects that certificate unless the proxy CA is trusted — it is added supervisor-side, outside the sandbox, so the session still has no keychain access"
+run = """
+if ! command -v nono >/dev/null 2>&1; then
+  echo "mise: no sandbox installed (nono not on PATH) — starting Claude Code directly" >&2
+  exec claude --dangerously-skip-permissions
+fi
+if [ -z "${KBZ_SANDBOX_PROFILE:-}" ]; then
+  echo "mise: nono is installed but KBZ_SANDBOX_PROFILE is unset — refusing to start an unsandboxed session." >&2
+  echo "      Set it in mise.local.toml (git-ignored), or uninstall nono to run without a sandbox." >&2
+  exit 1
+fi
+if [ ! -r "$KBZ_SANDBOX_PROFILE" ]; then
+  echo "mise: KBZ_SANDBOX_PROFILE points at an unreadable file: $KBZ_SANDBOX_PROFILE" >&2
+  exit 1
+fi
+exec nono run --allow-cwd --profile "$KBZ_SANDBOX_PROFILE" --trust-proxy-ca --silent -- claude --dangerously-skip-permissions
+"""
+
+[tasks.claude-auth]
+description = "Sign Claude Code in from inside the sandbox, which is the only way it can store its credential where the session can use it: a profile that denies the login keychain makes the keychain write fail, and Claude Code falls back to $CLAUDE_CONFIG_DIR/.credentials.json. Needed once, and again when the refresh token expires (about every two months) — `mise run claude` itself needs no login, because refreshing a token is a plain HTTPS call. `--open-port 0` is what makes it work at all: the OAuth callback server binds an OS-assigned localhost port, which a sandbox otherwise refuses, and that grant deliberately exists only here and not in the profile"
+run = """
+if ! command -v nono >/dev/null 2>&1; then
+  echo "mise: no sandbox installed (nono not on PATH) — signing in directly" >&2
+  exec claude auth login
+fi
+if [ -z "${KBZ_SANDBOX_PROFILE:-}" ]; then
+  echo "mise: nono is installed but KBZ_SANDBOX_PROFILE is unset — see 'mise task info claude'." >&2
+  exit 1
+fi
+exec nono run --allow-cwd --profile "$KBZ_SANDBOX_PROFILE" --open-port 0 -- claude auth login
+"""

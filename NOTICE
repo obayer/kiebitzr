@@ -1,0 +1,10 @@
+Kiebitzr
+Copyright 2026 Oliver Bayer
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It is distributed WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Kiebitzr reports what a
+vulnerability database says about the images a cluster runs; it is not a guarantee that an
+image is free of vulnerabilities, and silence from it is not such a guarantee either. See
+section 7 of the License, and `docs/runbooks/reading-the-metrics.md` for what the metrics do
+and do not claim.

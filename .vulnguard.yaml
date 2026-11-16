@@ -1,0 +1,19 @@
+# Vulnerabilities that are reachable from this code and accepted anyway, each with the reason
+# and the date the decision has to be made again. Checked by `mise run vuln`
+# (tools/vulnguard): an entry without a reason or a review date is an error, an entry whose
+# date has passed fails the build, and so does an entry that no longer matches any finding.
+#
+# Anything not listed here and reachable fails the build. This file is not a place to silence
+# a finding — it is a place to record a decision somebody has to defend.
+accepted:
+  - id: GO-2026-6905
+    module: github.com/blakesmith/ar
+    review: 2026-12-15
+    reason: >
+      Reader.Read panics on an archive member with a negative size, and there is no fixed
+      version: the library is unmaintained and Syft would have to replace it. Reached only
+      through Syft's deb cataloger, which parses every file inside a recover() — see
+      syft/pkg/cataloger/generic/cataloger.go in syft v1.56.0, which recovers per file, per
+      package processor and per task. A crafted .deb therefore costs one unparsed file in one
+      image, not the process: the run continues, the image is reported as failed and the
+      previous result keeps being served. Revisit when Syft changes deb handling.

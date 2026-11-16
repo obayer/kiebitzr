@@ -1,0 +1,24 @@
+# ko build configuration — see docs/adr/0002-build-and-release-with-ko-and-keyless-cosign.md
+defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+defaultPlatforms:
+  - linux/arm64
+  - linux/amd64
+builds:
+  - id: kiebitzr
+    main: ./cmd/kiebitzr
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # One entry, not three, and that is the fix for a released image reporting
+    # version "dev". Repeated `-ldflags` occurrences do not accumulate — the last one wins
+    # and the earlier ones are discarded (measured: `-ldflags "-s -w" -ldflags
+    # "-X main.V=only"` strips nothing and sets only V). As three list entries, only the
+    # last survived: v2026.1109.2 carried the right Commit, kept the compiled-in default
+    # "dev" as its Version, and was not stripped. An empty VERSION is not the explanation —
+    # `-X name=` sets an empty string rather than leaving the default.
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/obayer/kiebitzr/internal/version.Version={{ .Env.VERSION }}
+        -X github.com/obayer/kiebitzr/internal/version.Commit={{ .Git.FullCommit }}

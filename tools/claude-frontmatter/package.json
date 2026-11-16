@@ -1,0 +1,14 @@
+{
+  "name": "claude-frontmatter",
+  "version": "0.3.0",
+  "description": "Vendored build of the claude-frontmatter tools (MIT). Frozen copy: no registry, updated by hand only.",
+  "license": "MIT",
+  "private": true,
+  "bin": {
+    "frontmatter-kg": "./dist/kg.js",
+    "frontmatter-lint": "./dist/lint.js"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}
