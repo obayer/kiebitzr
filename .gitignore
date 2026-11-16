@@ -32,3 +32,9 @@ sboms/
 grype-db/
 
 .DS_Store
+
+# Stray binaries from `go build ./tools/<name>`, which writes into the current directory.
+# The tasks use `go run`, so these only appear by hand — and one was nearly committed.
+/vulnguard
+/identityguard
+/licenseguard

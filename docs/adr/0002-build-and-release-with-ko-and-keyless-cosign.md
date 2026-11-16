@@ -66,6 +66,16 @@ single home: one private GitHub repository. There is no mirror elsewhere.
   detector, `govulncheck`, `betterleaks`.
 - **Weekly scheduled rebuild** of the latest release tag, so standard-library and base-image
   fixes reach the image without a code change.
+- **Third-party license texts ship with the binary.** A statically linked Go binary contains
+  its dependencies, and Apache-2.0, MIT and BSD all require the license text to accompany a
+  *binary* distribution — an obligation on whoever publishes the image. The SBOM does not
+  discharge it: it names licenses, and a name is not a notice. `mise run licenses`
+  (`tools/licenseguard`) collects the texts from the link set of the release build into
+  `cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES`, which ko embeds in the image at `$KO_DATA_PATH`;
+  `licenses:check` is a gate, because a generated file nobody regenerates is the one that goes
+  quietly wrong. Measured: **384 components, 2.3 MB, about two seconds.** No license classifier
+  is involved — two dependencies here carry valid license files that no classifier can name,
+  and a notice needs the text rather than the name.
 - **Actions are pinned to a commit**, with the version they carried in a trailing comment. A
   tag is a moving reference its owner can repoint, and the release job holds `packages: write`
   and `id-token: write` — the one place where a repointed tag would run beside the signing key.

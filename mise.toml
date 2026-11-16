@@ -95,6 +95,14 @@ run = "betterleaks git --staged --config .betterleaks.toml --no-banner --redact 
 description = "Scan every commit in the history for credentials, not just the current files. The gate that keeps secrets out of the repository: a credential committed and deleted again stays in the history and only this finds it. Part of `check`; needs the full history, not a shallow clone"
 run = "betterleaks git --config .betterleaks.toml --no-banner --redact ."
 
+[tasks.licenses]
+description = "Regenerate cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES: the license text of every component linked into the release binary, collected from the module cache. Run after a dependency change, then commit the file — it ships inside the image, because ko embeds everything under kodata and the licenses of a statically linked binary have to travel with the binary"
+run = "go run ./tools/licenseguard -write"
+
+[tasks."licenses:check"]
+description = "Fail if THIRD_PARTY_NOTICES no longer matches the link set, or if a linked package has no license text at all. Part of `check`; fix with `mise run licenses`. Costs about two seconds — it reads the module cache and classifies nothing"
+run = "go run ./tools/licenseguard"
+
 [tasks.identity]
 description = "Check that the author and committer address git would use has committed to this repository before, and refuse a new one unless IDENTITYGUARD_ALLOW_NEW=1 says it is deliberate. Why it exists: a repository-local user.email lives in .git/config, which no clone and no worktree inherits, so a checkout silently falls back to the global identity and publishes it. Deliberately not part of `check`: a first contribution is new by definition, and a gate that fails every newcomer's pull request gets removed rather than heeded — it belongs in the pre-commit hook, where the commit can still be prevented"
 run = "go run ./tools/identityguard"
@@ -108,8 +116,8 @@ description = "Install the git pre-commit hook that runs `precommit`, so a crede
 run = "mise generate git-pre-commit --hook pre-commit --task precommit --write"
 
 [tasks.check]
-description = "Run every gate CI runs: format, vet, lint, tests in both build configurations, govulncheck, secret scan of both the working tree and the git history. Run before every commit; a green check locally means a green CI"
-depends = ["fmt:check", "vet", "lint", "test", "test:dev", "vuln", "secrets", "secrets:history"]
+description = "Run every gate CI runs: format, vet, lint, tests in both build configurations, govulncheck, the third-party notices, and a secret scan of both the working tree and the git history. Run before every commit; a green check locally means a green CI"
+depends = ["fmt:check", "vet", "lint", "test", "test:dev", "vuln", "licenses:check", "secrets", "secrets:history"]
 
 [tasks.build]
 description = "Build the kiebitzr binary for the current platform into bin/ (static, CGO off) with the `dev` tag, so -kubeconfig works and the binary can be pointed at a cluster from here. For local runs only — this is not what is released"

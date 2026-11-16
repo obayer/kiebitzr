@@ -195,6 +195,25 @@ part of `mise run check` and does not run in CI: a first contribution is new by 
 a gate that fails every newcomer gets removed rather than heeded. What CI cannot repair — a
 published address — a commit hook can prevent.
 
+### A dependency without its license text
+
+`mise run licenses:check` (`tools/licenseguard`) is part of `check`. It fails when
+`cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES` no longer matches what the release build links, and
+when a linked package has no license text anywhere up to its module root. After a dependency
+change:
+
+```bash
+mise run licenses   # regenerate, then commit the file with the dependency change
+```
+
+Why a committed file rather than something generated at release time: it has to be reviewable,
+and it has to be in the image. A statically linked binary contains its dependencies, and
+Apache-2.0, MIT and BSD each require the license text to accompany a binary distribution — the
+obligation is on whoever publishes the image, and the SBOM does not discharge it, because it
+names licenses and a name is not a notice. The file lives under `cmd/kiebitzr/kodata/`, which
+is how ko puts it in the image; one file therefore serves both the repository and the
+recipient.
+
 ### Anything naming a real installation
 
 No hostnames, addresses, cluster, namespace or workload names, no local paths, no usernames.

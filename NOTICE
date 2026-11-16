@@ -3,6 +3,11 @@ Copyright 2026 Oliver Bayer
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
+It is a statically linked binary and therefore contains third-party components. Their license
+texts are reproduced in cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES, which ships inside the release
+image as well, at $KO_DATA_PATH/THIRD_PARTY_NOTICES. Component names and license identifiers
+are additionally listed in the SPDX SBOM attached to every release image.
+
 It is distributed WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND. Kiebitzr reports what a
 vulnerability database says about the images a cluster runs; it is not a guarantee that an
 image is free of vulnerabilities, and silence from it is not such a guarantee either. See
