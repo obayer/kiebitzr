@@ -612,6 +612,82 @@ all. No component holds both.
 every image with `unreachable_image` — and it fails on the *worker*, while the metric appears
 on the matcher.
 
+### Keeping the work API to the workers
+
+**The work API is unauthenticated, deliberately** (ADR 0009). The network is its only
+boundary, which makes the two policies below part of the deployment rather than hardening on
+top of it. Give the installation a **namespace of its own** as well: it is what lets the
+policies select on the namespace instead of on labels another team also uses.
+
+The reason is one route out of three. A caller who reaches the port can take work
+(`GET /work`) or mark digests failed (`POST /failure/{digest}`) — both leave a trace, in
+`kiebitzr_catalogue_queue_depth` and in `kiebitzr_image_failed`. The third,
+`POST /sbom/{digest}`, **leaves none**: a forged SBOM is matched like any other and the image
+is published with the findings it does not have. That is the one failure of this service that
+nobody can see from the outside, and the policy is what prevents it.
+
+Ingress to the matcher's work port, from the workers and nothing else:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: matcher-work-api
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/component: matcher }
+  policyTypes: [Ingress]
+  ingress:
+    # The work port: workers only.
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/component: worker }
+      ports:
+        - { protocol: TCP, port: 8081 }
+    # /metrics stays reachable for Prometheus, on the other port.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <your monitoring namespace> }
+      ports:
+        - { protocol: TCP, port: 8080 }
+```
+
+Egress from the workers, to the matcher and the registries they pull from:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-egress
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/component: worker }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/component: matcher }
+      ports:
+        - { protocol: TCP, port: 8081 }
+    - ports:
+        - { protocol: UDP, port: 53 }   # DNS
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+      ports:
+        - { protocol: TCP, port: 443 }  # registries
+```
+
+Both assume the `app.kubernetes.io/component` labels are yours to set; use whatever your
+deployment already labels these pods with. The worker's egress is the broader of the two
+because a worker pulls from whatever registry an image lives in — narrow it to your
+registries if you know them, which also turns a typo in an image reference into a refused
+connection rather than a request to a stranger.
+
+**A matcher without workers needs neither policy** for this reason: with
+`-catalogue-locally` left at its default there is no work port at all.
+
 ### How many workers
 
 **Not one.** This is the first thing to get right, because "one of each" is the natural reading

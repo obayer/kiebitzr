@@ -330,3 +330,31 @@ numbers and the method. What changes here:
   peak is 812 MiB of live heap on that 559 MiB image, so what moves into the worker is
   larger than this ADR assumed, and the case for one worker on a roomy node is stronger
   rather than weaker.
+
+## Amendment: the work API stays unauthenticated, and the network stays the boundary
+
+Left open here and carried as P3 in `TODO.md`: whether workers should authenticate to the
+matcher with a shared secret. **They should not.** The decision, with its reasons, so that
+the next reader does not reopen it:
+
+- **The precondition is already the incident.** Reaching the work port means being able to
+  run or take over a pod in the cluster. An attacker who can do that has better targets than
+  a vulnerability exporter — starting with the workloads it reports on.
+- **There is nothing to take.** The service holds no data, writes nothing to the cluster and
+  reads only pods. The whole prize is a dashboard showing wrong numbers.
+- **A secret adds more failure than it removes.** It would be this project's first long-lived
+  credential, and therefore its first rotation — a procedure that can break the pool. A
+  worker pool desynchronised during a rotation is likelier than the attack the secret
+  prevents, and against the attacker who can read Secrets in the namespace it does nothing at
+  all, because every worker holds the same one.
+- **`SECURITY.md` already said so**, listing a deliberately exposed work API under what is
+  not a vulnerability. This records the reasoning that sentence rests on.
+
+What the decision owes in return is that the control it relies on must be deployable without
+inventing it. `running-kiebitzr.md` now ships both policies and asks for a namespace of its
+own, and it says which of the three routes is the one that matters: `GET /work` and
+`POST /failure` move metrics somebody can see, while a forged `POST /sbom` is the single
+silent failure this service has.
+
+Revisit if the work API ever gains a route that writes outside the cache, or if a deployment
+appears where the matcher and its workers cannot be isolated by network policy at all.
