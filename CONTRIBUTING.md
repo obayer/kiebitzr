@@ -60,11 +60,27 @@ mise run setup             # tools, docs tooling and the pre-commit hook
 mise run check             # what CI runs
 mise run precommit         # what the hook runs: staged secret scan and commit identity
 mise run test:integration  # the real registry and the real vulnerability database
+mise run measure           # what a run costs in memory and time, per phase
 mise tasks ls              # everything else
 ```
 
 `check` never touches the network except for `govulncheck`; the integration tests pull an
 image and download the vulnerability database, so they are a separate task.
+
+`measure` is the same kind of task and the same build tag, kept apart because it catalogues
+several images and takes tens of minutes. It samples the Go runtime's own accounting every
+50 ms while a run proceeds, and reports peak live heap, peak arena, allocations and wall time
+for each phase, plus a sweep of Syft's parallelism against peak memory. That resolution is
+the point: the exporter publishes the same counters in a cluster, but at a 60-second scrape
+the peak lasts one or two samples, so what Prometheus reports is a lower bound. Sizing
+figures in the runbook and in ADR 0001 are meant to be re-derived from this task rather than
+carried forward.
+
+It needs **room on the temporary filesystem**, several gigabytes of it: the vulnerability
+database is downloaded into a fresh directory on every run rather than reused, and the
+largest subject is unpacked once per phase and once per parallelism step. Nothing survives
+the run, but a machine with a nearly full disk will fail the link step of an unrelated task
+while it is going.
 
 Formatting is **gofumpt** plus fixed import groups, applied through `golangci-lint fmt` so
 that formatting and linting can never disagree about a file. `.golangci.yaml` documents both

@@ -79,6 +79,11 @@ run = "go test -tags dev -race -count=1 ./..."
 description = "Run the tests that talk to the real world: catalogue an image from a registry with Syft and match it against the real vulnerability database. Needs network to the registry and to grype.anchore.io, downloads the database (hundreds of MB) and reports how long a cold run takes — the measurement ADR 0001 asks for. Not part of `check`. Override the subject with KIEBITZR_TEST_IMAGE and KIEBITZR_TEST_PLATFORM"
 run = "go test -tags integration -count=1 -timeout 30m -v ./..."
 
+[tasks.measure]
+description = "Measure what a run costs: peak live heap, peak arena, allocations and wall time per phase — reaching the registry, cataloguing with Syft, matching against the database — plus a sweep of Syft's parallelism against peak memory. Samples inside the process every 50 ms, which is what the cluster's own `go_*` series cannot do: at a 60-second scrape their peak is a lower bound on a spike that lasts one or two samples. Needs the same network as `test:integration` and downloads the database. Not part of `check`; catalogues four images and takes tens of minutes. Override the subjects with KIEBITZR_PROFILE_IMAGES (comma-separated) and the platform with KIEBITZR_TEST_PLATFORM"
+env = { KIEBITZR_PROFILE = "1" }
+run = "go test -tags integration -count=1 -timeout 60m -v -run 'TestResourceUseOfTheRunPhases|TestPeakMemoryAgainstCatalogueParallelism' ./internal/catalog/"
+
 [tasks.vuln]
 description = "Report known Go vulnerabilities that are reachable from this code (stdlib and modules), via govulncheck. Reachable findings fail unless `.vulnguard.yaml` accepts them with a reason and a review date — govulncheck has no such mechanism, and a transitive vulnerability without an upstream fix would otherwise keep the gate red forever. Needs network to vuln.go.dev. Part of `check`"
 run = "go run ./tools/vulnguard"

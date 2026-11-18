@@ -39,9 +39,18 @@ func SetLogger(log *slog.Logger) {
 	stereoscope.SetLogger(anchorelog.New(log.With("library", "stereoscope")))
 }
 
-// parallelism is deliberately one. Cataloguing in parallel multiplies peak memory, and the
-// service is meant to run on small nodes; raise it once the pilot has measured what the
-// largest image actually costs (ADR 0001, open questions).
+// parallelism is deliberately one, but not for the reason this constant carried until it was
+// measured. The claim was that cataloguing in parallel multiplies peak memory. It does not:
+// swept against a 559 MiB image by the harness in resource_test.go, peak live heap went
+// 848 → 898 → 913 MiB from parallelism 1 to 2 to 4, which is 8 % and not 4×.
+//
+// What the sweep did show is that raising it buys nothing. Wall time was 21.3 s, 22.1 s and
+// 21.7 s — flat, because a catalogue is spent waiting on a registry and unpacking layers, not
+// on work a second core could take. So the value stays at one for the honest reason: more
+// costs a little memory and returns no time.
+//
+// Cataloguing takes it as a parameter below so the harness measures this code path rather
+// than a copy of it.
 const parallelism = 1
 
 // ResolveError means the image could not be reached for the configured platform at all, as
@@ -91,7 +100,13 @@ func New(platform string) (*Cataloguer, error) {
 //
 // Nothing is written to w before Syft has produced the whole SBOM, so a failure here leaves w
 // untouched rather than half-written.
-func (c *Cataloguer) CatalogueTo(ctx context.Context, ref string, w io.Writer) (err error) {
+func (c *Cataloguer) CatalogueTo(ctx context.Context, ref string, w io.Writer) error {
+	return c.catalogueTo(ctx, ref, w, parallelism)
+}
+
+// catalogueTo is CatalogueTo with Syft's parallelism exposed, which only the resource harness
+// varies. Everything else about the two is the same call.
+func (c *Cataloguer) catalogueTo(ctx context.Context, ref string, w io.Writer, parallelism int) (err error) {
 	src, err := syft.GetSource(ctx, ref, syft.DefaultGetSourceConfig().
 		WithSources(image.OciRegistrySource).
 		WithPlatform(c.platform))
