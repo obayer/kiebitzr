@@ -101,11 +101,11 @@ description = "Scan every commit in the history for credentials, not just the cu
 run = "betterleaks git --config .betterleaks.toml --no-banner --redact ."
 
 [tasks.licenses]
-description = "Regenerate cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES: the license text of every component linked into the release binary, collected from the module cache. Run after a dependency change, then commit the file — it ships inside the image, because ko embeds everything under kodata and the licenses of a statically linked binary have to travel with the binary. The result is the union over the platforms in .ko.yaml and therefore the same on any machine; generating it for the host would describe the wrong artefact"
+description = "Regenerate cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES: the license text of every component linked into the release binary, collected from the module cache. The release workflow runs this one step before `ko build`, so what ships always matches the link set it was built from — the committed file is a reviewable snapshot and not what discharges the obligation. Run it by hand after a dependency change if you want the snapshot current, and before `mise run image`, which embeds whatever is in the tree. The result is the union over the platforms in .ko.yaml and therefore the same on any machine; generating it for the host would describe the wrong artefact"
 run = "go run ./tools/licenseguard -write"
 
 [tasks."licenses:check"]
-description = "Fail if THIRD_PARTY_NOTICES no longer matches the link set, or if a linked package has no license text at all. Part of `check`; fix with `mise run licenses`. Costs about two seconds — it reads the module cache and classifies nothing"
+description = "Fail if THIRD_PARTY_NOTICES no longer matches the link set, or if a linked package has no license text at all. Deliberately not part of `check`: it would make every dependency bump that pulls in one more module arrive red, and neither bot can regenerate the file itself. The release workflow runs it right after `licenses`, where the second half is what matters — a linked package with no license text anywhere must stop a release rather than ship in one. Costs about two seconds; it reads the module cache and classifies nothing"
 run = "go run ./tools/licenseguard"
 
 [tasks.identity]
@@ -122,7 +122,7 @@ run = "mise generate git-pre-commit --hook pre-commit --task precommit --write"
 
 [tasks.check]
 description = "Run every gate CI runs: format, vet, lint, tests in both build configurations, govulncheck, the third-party notices, and a secret scan of both the working tree and the git history. Run before every commit; a green check locally means a green CI"
-depends = ["fmt:check", "vet", "lint", "test", "test:dev", "vuln", "licenses:check", "secrets", "secrets:history"]
+depends = ["fmt:check", "vet", "lint", "test", "test:dev", "vuln", "secrets", "secrets:history"]
 
 [tasks.build]
 description = "Build the kiebitzr binary for the current platform into bin/ (static, CGO off) with the `dev` tag, so -kubeconfig works and the binary can be pointed at a cluster from here. For local runs only — this is not what is released"

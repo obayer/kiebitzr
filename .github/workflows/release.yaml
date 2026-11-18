@@ -64,6 +64,33 @@ jobs:
           mise install 'go:golang.org/x/vuln/cmd/govulncheck'
           mise run vuln
 
+      # The notices that ship are generated here rather than taken from the tree, and then
+      # verified before anything is built. Two reasons.
+      #
+      # The obligation is the publisher's and it attaches to the *binary*: what the image has
+      # to carry is the license text of the link set it was actually built from. Generating it
+      # one step before `ko build` is the only point where those two cannot disagree — a file
+      # committed earlier describes whatever the link set was when somebody last ran the task.
+      #
+      # And it is what keeps a dependency bump mergeable. `licenses:check` used to gate every
+      # pull request, so any bump that pulled in one more module arrived red and needed a
+      # human to regenerate the file on the bot's branch. Neither bot can do that itself:
+      # Renovate's `postUpgradeTasks` is self-hosted-only and the hosted app silently runs
+      # nothing, and a workflow that pushed the fix would have to push with `GITHUB_TOKEN`,
+      # whose commits trigger no workflows (TODO.md P4) — so the regenerated head would carry
+      # no checks at all. Moving the work here removes the gate instead of automating it.
+      #
+      # `licenses:check` after `licenses` is not redundant. Generating cannot produce a
+      # mismatch, but it can produce a notice file with a linked package whose license text is
+      # nowhere to be found, and that must stop the release rather than ship in it.
+      - name: Collect and verify the third-party notices
+        run: |
+          mise run licenses
+          mise run licenses:check
+          if ! git diff --quiet -- cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES; then
+            echo "::notice title=notices::the committed snapshot was stale; the image carries the freshly collected set"
+          fi
+
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Log in to ghcr.io

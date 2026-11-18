@@ -213,22 +213,34 @@ published address — a commit hook can prevent.
 
 ### A dependency without its license text
 
-`mise run licenses:check` (`tools/licenseguard`) is part of `check`. It fails when
-`cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES` no longer matches what the release build links, and
-when a linked package has no license text anywhere up to its module root. After a dependency
-change:
+A statically linked binary contains its dependencies, and Apache-2.0, MIT and BSD each
+require the license text to accompany a binary distribution. The obligation is on whoever
+publishes the image, and the SBOM does not discharge it: it names licenses, and a name is not
+a notice. `cmd/kiebitzr/kodata/THIRD_PARTY_NOTICES` is what carries them, under the directory
+ko puts in the image.
+
+**The release generates it, one step before `ko build`** — see `release.yaml`. That is the
+only point at which the notices and the link set cannot disagree, and the step runs
+`licenses:check` immediately after: generating cannot produce a mismatch, but it can produce a
+notice file containing a linked package whose license text is nowhere to be found, and that
+stops the release instead of shipping in it.
+
+The committed file is therefore a **reviewable snapshot**, not what discharges the obligation.
+Keep it current when you change a dependency, and regenerate it before building an image
+locally, because `mise run image` embeds whatever is in the tree:
 
 ```bash
-mise run licenses   # regenerate, then commit the file with the dependency change
+mise run licenses       # regenerate the snapshot
+mise run licenses:check # what the release runs: mismatch, and missing license text
 ```
 
-Why a committed file rather than something generated at release time: it has to be reviewable,
-and it has to be in the image. A statically linked binary contains its dependencies, and
-Apache-2.0, MIT and BSD each require the license text to accompany a binary distribution — the
-obligation is on whoever publishes the image, and the SBOM does not discharge it, because it
-names licenses and a name is not a notice. The file lives under `cmd/kiebitzr/kodata/`, which
-is how ko puts it in the image; one file therefore serves both the repository and the
-recipient.
+**`licenses:check` is deliberately not part of `check`.** It was, and it made every
+dependency bump that pulled in one more module arrive red — a bot cannot fix that itself.
+Renovate's `postUpgradeTasks` is self-hosted-only and the hosted app silently runs nothing,
+and a workflow pushing the regenerated file would push with `GITHUB_TOKEN`, whose commits
+trigger no workflows, leaving a pull-request head with no checks on it. Moving the work into
+the release removed the gate rather than automating it; a stale snapshot now costs a `notice`
+annotation on the release run and nothing else.
 
 ### Anything naming a real installation
 
