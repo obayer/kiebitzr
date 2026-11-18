@@ -159,3 +159,42 @@ container store can never be catalogued, because this design pulls from a regist
 refuses the container runtime socket. It surfaces as
 `kiebitzr_scan_errors_total{reason="unreachable_image"}` and is a consequence of the access
 model, not a defect.
+
+## Amendment: the peak measured per phase, and the parallelism premise withdrawn
+
+The answer above was one pilot observation with no way to re-derive it. `mise run measure`
+(`internal/catalog/resource_test.go`) now samples the runtime every 50 ms around each phase
+of a run, against public images spanning 27 to 559 MiB of layers. Measured 2026-11-17:
+
+| Phase | Peak live heap | Peak arena | Allocated |
+|---|---|---|---|
+| Opening the database | 170 MiB | 182 MiB | 165 MiB |
+| Cataloguing a 27 MiB image | 100 MiB | 137 MiB | 364 MiB |
+| Cataloguing a 45 MiB image | 94 MiB | 158 MiB | 437 MiB |
+| Cataloguing a 559 MiB image | **812 MiB** | **1000 MiB** | 3.1 GiB |
+| Matching that image's 1,663 findings | 110 MiB | 173 MiB | 3.7 GiB |
+
+Three corrections follow.
+
+**274 MB is not the ceiling, it is a mid-sized image.** The peak tracks what there is to
+catalogue: a twenty-fold image costs an eight-fold heap. The gigabyte of arena the pilot
+reported is confirmed, but as the cost of one large image rather than as a general property
+— which is why the runbook now says to size against the largest image rather than to copy a
+number.
+
+**`catalog.parallelism` stays at one, but not for the reason given here.** "Parallel
+cataloguing multiplies this peak" is wrong. Swept against the 559 MiB image, peak live heap
+went 848 → 898 → 913 MiB from parallelism 1 to 2 to 4 — 8 %, not 4×. What the sweep did show
+is that it buys nothing: wall time was 21.3 s, 22.1 s and 21.7 s, flat, because a catalogue
+waits on a registry and unpacks layers rather than occupying a core. The decision is
+unchanged and its premise is replaced. [ADR 0009](0009-distribute-cataloguing-over-a-worker-pool.md)
+repeats the old premise in its scaling argument and is amended likewise.
+
+**Matching is churn, not footprint.** It allocates more than cataloguing and holds almost
+none of it, so it costs collector time rather than memory — which is why the matcher can be
+sized small even where a worker cannot.
+
+What remains unmeasured: where inside Syft the 812 MiB sits. That needs a profile, and a
+profile is only worth taking if the number has to come down. On the pilot installation it
+does not — median resident memory is 128 MiB, the peak lasts under two minutes a day, and
+nothing has been OOM-killed.

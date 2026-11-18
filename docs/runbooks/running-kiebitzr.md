@@ -155,18 +155,43 @@ section exists to prevent.
 
 ### Memory
 
-The live heap peaks around **274 MB** while an image is catalogued. Left alone, the Go heap
-grows well past that before collecting: 1.16 GB of arena was observed.
+**Size this against your largest image, not against an average.** Cataloguing is where the
+peak is, and it follows what there is to catalogue; everything else the service does is
+comparatively flat. Measured per phase with `mise run measure`, sampling the runtime every
+50 ms:
 
-Set **`GOMEMLIMIT`** (for example `1GiB`) and a container memory limit above it (`1.5Gi`).
-That way the garbage collector does the regulating — it works harder as the limit approaches —
-instead of the OOM killer ending the process. A memory limit without `GOMEMLIMIT` gives the
-runtime no reason to stay below it.
+| Phase | Peak live heap | Peak arena | Allocated |
+|---|---|---|---|
+| Opening the database, once per run | 170 MiB | 182 MiB | 165 MiB |
+| Cataloguing a 27 MiB image | 100 MiB | 137 MiB | 364 MiB |
+| Cataloguing a 45 MiB image | 94 MiB | 158 MiB | 437 MiB |
+| **Cataloguing a 559 MiB image** | **812 MiB** | **1000 MiB** | 3.1 GiB |
+| Matching that image's 1,663 findings | 110 MiB | 173 MiB | 3.7 GiB |
+
+Two things follow. **The peak belongs to cataloguing**, and a twenty-fold image buys an
+eight-fold heap, so an installation running one large image pays for that image every time
+it is catalogued anew. **Matching is churn, not footprint**: it allocates more than
+cataloguing does and holds almost none of it, so it costs collector time rather than memory.
+
+Set **`GOMEMLIMIT`** and a container memory limit above it. `1GiB` and `1.5Gi` cover the
+measurements above with room to spare and are the right starting point; an installation
+whose largest image is bigger than half a gigabyte should measure rather than inherit these.
+With the limit set, the garbage collector does the regulating — it works harder as the limit
+approaches — instead of the OOM killer ending the process. A memory limit without
+`GOMEMLIMIT` gives the runtime no reason to stay below it.
+
+**The container sees more than the process does.** On the pilot installation the cgroup's
+working set peaked at roughly twice the process' resident memory, because page cache from the
+vulnerability database and the SBOM files counts against the container. The limit has to
+cover that, which is the second reason it sits above `GOMEMLIMIT` rather than at it.
 
 ### CPU
 
-A run is one core, by design: cataloguing is deliberately not parallel, because parallelism
-multiplies peak memory. Requests of `200m` are plenty for the daily steady state.
+A run is one core, by design — but not because parallel cataloguing would multiply the peak.
+Swept against the 559 MiB image, raising Syft's parallelism from 1 to 4 cost 8 % more heap
+and returned no time at all: 21.3 s, 22.1 s, 21.7 s. A catalogue waits on a registry and
+unpacks layers; a second core has nothing to do. Requests of `200m` are plenty for the daily
+steady state.
 
 **Be careful with a hard CPU limit.** CFS throttling stretches the one long operation this
 service has — the cold start, which catalogues every running image — from tens of minutes into
@@ -577,7 +602,7 @@ What a worker needs, and what it does not:
 | Vulnerability database | none, so no 3.2 GB and no daily download |
 | Registry credentials | **yes** — the same `DOCKER_CONFIG` mount as above |
 | Temporary space | yes, sized by the largest single image, as for the matcher |
-| Memory | the 274 MB peak and `GOMEMLIMIT` advice move here, per worker |
+| Memory | the cataloguing peak and the `GOMEMLIMIT` advice move here, per worker |
 
 This is also where the credentials end up separated: after the split the matcher reads pods
 and holds no Docker config, while a worker pulls images and cannot reach the API server at
@@ -607,9 +632,9 @@ steady state the queue is empty for most of the day, so a fixed four to eight re
 reasonable default and an autoscaler on the depth is only worth it if your image estate churns
 hard. Whether to use one is an installation decision and not in this repository.
 
-**The one exception**, and it is about memory rather than throughput: cataloguing peaks at
-274 MB of live heap with over a gigabyte of arena (see *Memory* above), and that peak moves
-into the worker. A single worker on a roomy node therefore buys a matcher that can be sized
+**The one exception**, and it is about memory rather than throughput: cataloguing is where the
+peak is — 812 MiB of live heap and a gigabyte of arena on a 559 MiB image (see *Memory*
+above) — and that peak moves into the worker. A single worker on a roomy node therefore buys a matcher that can be sized
 small and stays predictable — worth it when the matcher sits on a board where that peak is the
 difference between fitting and being evicted. It is not faster; it is calmer. If that is the
 reason, say so in the deployment, because the replica count otherwise looks like a mistake.

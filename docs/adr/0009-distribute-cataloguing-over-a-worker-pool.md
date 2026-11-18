@@ -314,3 +314,19 @@ to a single process that way.
   for that; pointing `v6dist.Config.LatestURL` at an in-cluster mirror solves only the download
   multiplier, not the disk. Doing it in that order matters: each step has to earn its place
   before the next one makes sense.
+
+## Amendment: the peak is larger and parallelism is not why it is serial
+
+Two figures above come from [ADR 0001](0001-scan-running-images-with-read-only-pod-access.md)'s
+original pilot observation and have since been measured properly; its amendment carries the
+numbers and the method. What changes here:
+
+- "`catalog.parallelism` is deliberately one because parallel cataloguing multiplies the
+  274 MB peak" — the premise is wrong. Raising Syft's parallelism from 1 to 4 against a
+  559 MiB image cost 8 % more heap, not 4×, and returned no wall time at all. The constant
+  stays at one because raising it buys nothing, which leaves the scaling argument intact:
+  cataloguing is still serial per process, so the digest count still drives the time.
+- "the 274 MB peak moves into the worker" — the direction holds, the size does not. The
+  peak is 812 MiB of live heap on that 559 MiB image, so what moves into the worker is
+  larger than this ADR assumed, and the case for one worker on a roomy node is stronger
+  rather than weaker.
