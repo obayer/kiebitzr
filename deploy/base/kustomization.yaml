@@ -1,0 +1,48 @@
+# The reference installation: one pod that takes the inventory, catalogues, matches and serves
+# the metrics. This is a complete installation and the shape to run below roughly 200 distinct
+# image digests — which is most clusters, since a thousand nodes running the same twenty images
+# cost no more than twenty nodes running them.
+#
+# It is a *base*. What it fixes is the shape the service needs — the StatefulSet, the one
+# permission, the two volumes, the port — and what it leaves to an overlay is every
+# installation decision: namespace, storage class, platform, filters, credentials, how often it
+# runs. deploy/examples/single-pod is such an overlay and is the thing to copy.
+#
+# Build it to see what it produces, apply nothing yet:
+#   kubectl kustomize deploy/base
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Changing this one line is not enough to move the installation to another namespace, which is
+# why the namespace belongs in an overlay and not here: the field renames the Namespace object
+# and sets the namespace on every resource, but it rewrites the ClusterRoleBinding's subject
+# only when that subject is named `default` — and ours is not. The overlay carries the second
+# half, a NamespaceTransformer with `setRoleBindingSubjects: allServiceAccounts`. See
+# deploy/examples/single-pod/kustomization.yaml, and rbac.yaml for what a half-renamed binding
+# costs.
+namespace: kiebitzr
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - statefulset.yaml
+
+images:
+  # Pin a release rather than tracking a moving tag, and verify it before trusting it: the
+  # release images are signed keyless, and `cosign verify` against the workflow identity is in
+  # SECURITY.md. `mise run verify -- <tag>` does the same from a clone.
+  #
+  # A digest is the stronger pin and is what a cluster with imagePullPolicy: IfNotPresent
+  # actually benefits from — a tag that is repointed is a node that may or may not re-pull.
+  # Replace `newTag` with `digest: sha256:…` to do that.
+  - name: ghcr.io/obayer/kiebitzr
+    newTag: v2026.1118.0
+
+configMapGenerator:
+  # Generated rather than written out, because the generated name carries a content hash and
+  # that hash is what rolls the StatefulSet when a value changes. A hand-written ConfigMap
+  # keeps its name, so running pods keep the old values until something restarts them — the
+  # failure to recognise when a changed setting appears to do nothing at all.
+  - name: kiebitzr
+    envs:
+      - kiebitzr.env

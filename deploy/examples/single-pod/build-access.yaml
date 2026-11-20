@@ -1,0 +1,34 @@
+# Which images somebody here can get a build of. Declared, because nothing in or around an
+# image says who decides what goes into it: two repositories in one registry namespace, one
+# built by your own team and one by a stranger, carry the same metadata and the same signing
+# identity (ADR 0013).
+#
+# What it buys: a finding in a Go module or an npm package only moves when the publisher
+# rebuilds, however much an advisory says a fix exists. For an image your team builds, a
+# rebuild is an available action *even when no newer image exists yet* — the action is causing
+# one to exist. Without this file every image is `unknown`, which means "nobody has looked",
+# and the count of unknowns is the honest measure of whether this file is being kept up.
+#
+# Replace the examples. Patterns are repository patterns, `/*` matches below a path but not the
+# path itself, and the most specific match wins — so a registry-wide rule is a default that one
+# repository can override. Three values are declarable: `own`, `reachable`, `none`. `unknown`
+# is not: it is what no match means.
+#
+# Every rejection is a start-up error rather than a skipped rule — an unknown key, a duplicate
+# pattern, an undeclarable value. A misclassification is invisible in the metrics, so it has to
+# be caught before the process serves anything. An empty list is refused too: a file that
+# declares nothing looks exactly like a file nobody mounted.
+build-access:
+  # What my own team builds and can rebuild on demand.
+  - repository: registry.example/org/platform/*
+    access: own
+
+  # Another team here builds these — a rebuild can be asked for, and asking is a real action
+  # even though it does not end the condition (which is why none of this pages).
+  - repository: registry.example/org/billing/*
+    access: reachable
+
+  # A public image nobody here influences: the only remedy is a newer tag, if the publisher
+  # ships one.
+  - repository: docker.io/library/postgres
+    access: none
