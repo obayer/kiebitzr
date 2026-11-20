@@ -1,0 +1,41 @@
+# For a cluster running the Prometheus Operator (kube-prometheus-stack and the like). With
+# plain Prometheus, put the same two things in a `kubernetes_sd_configs` job with `role: pod`:
+# this pod's `metrics` port, and `honor_labels: true`.
+#
+# A PodMonitor and not a ServiceMonitor, because there is exactly one pod producing metrics and
+# nothing else talks to it — so a Service would be an object whose only job is to be the thing
+# the scraper looks up. The base therefore ships no Service at all. (A worker pool is the one
+# shape that needs one, for the work port the workers poll, and it is not part of this base.)
+#
+# `honorLabels: true` is the one setting that decides whether anything built on these metrics
+# is true, and getting it wrong is silent. kiebitzr_image_info carries its own `namespace` and
+# `container` — the *scanned pod's*, which is the entire point of the metric. Kubernetes
+# service discovery attaches labels of the same names describing the Kiebitzr pod itself, and
+# on a collision Prometheus renames ours: `namespace` becomes Kiebitzr's own on every series
+# and the workload's moves to `exported_namespace`. Every namespace filter and every grouping
+# in the metrics runbook then reads the wrong label and quietly returns one value for the whole
+# cluster.
+#
+# One thing to check if no targets appear: a Prometheus selects the PodMonitors it reads via
+# `podMonitorSelector`, and most stacks narrow it to their own release label. Add whatever
+# label yours selects on to the metadata below — an unselected PodMonitor is not an error
+# anywhere, it is simply never read.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kiebitzr
+  labels:
+    app.kubernetes.io/name: kiebitzr
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kiebitzr
+      app.kubernetes.io/component: matcher
+  podMetricsEndpoints:
+    # The *container* port's name, which is where a PodMonitor differs from a ServiceMonitor:
+    # it addresses the pod directly, so there is no service port to indirect through.
+    - port: metrics
+      honorLabels: true
+      # A run takes minutes to hours and publishes atomically at the end, so there is nothing
+      # a fast scrape would catch earlier. The freshness alerts are measured in hours.
+      interval: 60s

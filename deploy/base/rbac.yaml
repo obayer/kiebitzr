@@ -1,0 +1,49 @@
+# The whole Kubernetes access of this service. If a copy of this file carries more than
+# `list` on `pods`, it is either a mistake or not this service (ADR 0001).
+#
+# `watch` may be added and is harmless — the service only lists — but it is left out here so
+# that what is granted is what is used. No Secrets: Kiebitzr reads registry credentials from
+# a file the kubelet mounted into it, never through the API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kiebitzr
+  labels:
+    app.kubernetes.io/name: kiebitzr
+---
+# Cluster-wide, because the inventory is the whole cluster's running images. There is no
+# namespaced variant of this: a Role per namespace would mean the findings describe the
+# namespaces somebody remembered to add, and an unlisted namespace would look clean.
+# `-exclude-namespaces` is how an installation narrows the inventory, and it is counted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kiebitzr
+  labels:
+    app.kubernetes.io/name: kiebitzr
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kiebitzr
+  labels:
+    app.kubernetes.io/name: kiebitzr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kiebitzr
+subjects:
+  # This namespace is the one thing a rename has to carry along, and kustomize's `namespace:`
+  # field does *not* do it on its own: it rewrites binding subjects only when they are named
+  # `default` (measured with kustomize 5.8). A binding left pointing at a namespace the
+  # ServiceAccount no longer lives in fails in the one way worth avoiding — the pod starts,
+  # the list of pods is refused, and the service reports an error instead of findings. What
+  # keeps the two in step when an overlay renames the namespace is the NamespaceTransformer
+  # there, with `setRoleBindingSubjects: allServiceAccounts`.
+  - kind: ServiceAccount
+    name: kiebitzr
+    namespace: kiebitzr

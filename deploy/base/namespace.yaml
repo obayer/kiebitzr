@@ -1,0 +1,11 @@
+# A namespace of its own, and not for tidiness: the NetworkPolicies that keep the work API to
+# the workers select on the namespace, because labels another team also uses are not a
+# boundary (docs/runbooks/running-kiebitzr.md, "Keeping the work API to the workers"). A
+# single-pod installation has no work API and needs no policy, but it should still start in
+# the namespace it would need later.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kiebitzr
+  labels:
+    app.kubernetes.io/name: kiebitzr

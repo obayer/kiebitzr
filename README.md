@@ -90,6 +90,11 @@ hundred nodes is catalogued once and cached under its digest.
 importable and asks for a datasource; its first row answers whether anything below it is valid
 at all, before a single finding is shown.
 
+**Manifests to start from.** [`deploy/`](deploy) is a Kustomize base and a commented example
+overlay: the StatefulSet, the one permission, the cache volume, and the two files an
+installation supplies. A template to copy rather than something to depend on — the manifests an
+installation runs belong to the repository that deploys it.
+
 **It scales by moving one step.** Cataloguing is the expensive part and the only part that
 leaves the process; everything else stays in one pod.
 

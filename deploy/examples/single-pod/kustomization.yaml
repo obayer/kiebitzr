@@ -1,0 +1,146 @@
+# An example installation, and the file to copy. Everything in here is an installation
+# decision — a name, a storage class, a platform, what to classify, what to check. Nothing in
+# here changes the *shape* of the service; that is what the base is for.
+#
+# See what it produces, before anything touches a cluster:
+#   kubectl kustomize deploy/examples/single-pod
+#
+# Then, from a copy of this directory with your own values:
+#   kubectl apply -k <your copy>
+#
+# The first run is the slow one: every running image is catalogued and the 3.2 GB vulnerability
+# database is downloaded. On a small ARM board, 20–35 minutes for 50 image digests. Nothing is
+# published until the first run completes, and `kiebitzr_last_success_timestamp_seconds` is how
+# you see that it has.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # A relative path, so copying `deploy/` as a whole keeps working and the copy owes this
+  # repository nothing. That is the intended way: these manifests are a template, and the ones
+  # an installation runs belong to the repository that deploys it (ADR 0001).
+  - ../../base
+
+  # Kustomize can also pull the base over the network instead:
+  #
+  #   - github.com/obayer/kiebitzr//deploy/base?ref=<a tag carrying deploy/>
+  #
+  # That is a different arrangement, not a shortcut for the same one: the shape of the
+  # installation then comes from this repository at the pinned ref and changes when the ref is
+  # raised. Pin a tag rather than a branch if you take it — an unpinned base changes under an
+  # installation without anybody deciding to update it.
+
+  # Uncomment if the Prometheus Operator is installed. Read the comment in the file first —
+  # `honorLabels` is not optional, it decides whether the metrics mean what they say, and a
+  # PodMonitor your Prometheus does not select on is silently never read.
+  # - podmonitor.yaml
+
+# The base pins a release tag. Override it here to run a different one, or to pin the digest
+# instead, which is the stronger form — and verify what you pin: `mise run verify -- <tag>`
+# from a clone, or the `cosign verify` command in SECURITY.md.
+#
+# images:
+#   - name: ghcr.io/obayer/kiebitzr
+#     digest: sha256:…
+
+# A namespace of its own, named in two places that have to agree. The field renames the
+# Namespace object from the base and sets the namespace on everything in it; the transformer is
+# what also follows the ServiceAccount into the ClusterRoleBinding — kustomize's field alone
+# rewrites binding subjects only when they are named `default`, which is a detail of the tool
+# rather than a choice. If the two disagree, the pod starts and is refused the list of pods.
+#
+# `kubectl kustomize deploy/examples/single-pod | grep -A4 subjects:` is how to check it.
+namespace: kiebitzr
+
+transformers:
+  - |-
+    apiVersion: builtin
+    kind: NamespaceTransformer
+    metadata:
+      name: namespace
+      namespace: kiebitzr
+    setRoleBindingSubjects: allServiceAccounts
+
+configMapGenerator:
+  # `behavior: merge` keeps the base's env file and overrides the keys named here, so this file
+  # only carries what differs. The name must stay `kiebitzr` — that is what the pod's
+  # `envFrom` refers to, and the hash kustomize appends is resolved for it automatically.
+  - name: kiebitzr
+    behavior: merge
+    envs:
+      - kiebitzr.env
+
+  # The YAML files the service reads by path. The name must stay `kiebitzr-files`: the base
+  # mounts a ConfigMap of that name at /etc/kiebitzr as `optional`, so creating it here is the
+  # whole of switching this on — and the hash in its generated name is what rolls the pod when
+  # you edit a classification.
+  #
+  # An ignore file would go here as a second entry, with KIEBITZR_IGNORE_FILE naming its path.
+  - name: kiebitzr-files
+    files:
+      - build-access.yaml
+
+patches:
+  # Storage, and this is the one thing to get right *before the first apply*: a
+  # volumeClaimTemplate is immutable afterwards, so changing the class or the size later means
+  # deleting the StatefulSet (keeping the PVC) or starting the cache over. Losing the cache
+  # costs one slow run and no data.
+  #
+  # A JSON patch rather than a merge patch: volumeClaimTemplates is a list that a strategic
+  # merge would replace as a whole, which would mean repeating every field of the claim here
+  # and keeping the copy in step with the base.
+  - target:
+      kind: StatefulSet
+      name: kiebitzr
+    patch: |
+      # Your cluster's block storage class. Remove this operation to use the default class.
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: local-path
+      # 10 GB is the base's figure and covers the database twice over, which an update needs.
+      # Raise it rather than lower it: a full volume fails the database update, and a failed
+      # update is a failed run.
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 10Gi
+
+  # Memory, if your largest image is bigger than half a gigabyte. The peak belongs to
+  # cataloguing and follows what there is to catalogue: a 559 MiB image peaked at 812 MiB of
+  # live heap, a 45 MiB one at 94 MiB. Raise the limit and GOMEMLIMIT together, keeping
+  # GOMEMLIMIT below the limit — and measure rather than guess, because the container sees
+  # page cache the process does not.
+  #
+  # A merge patch here rather than a JSON one, because it addresses the container and the
+  # variable by *name* — an index would silently move the day the base adds a setting.
+  #
+  # - patch: |
+  #     apiVersion: apps/v1
+  #     kind: StatefulSet
+  #     metadata:
+  #       name: kiebitzr
+  #     spec:
+  #       template:
+  #         spec:
+  #           containers:
+  #             - name: kiebitzr
+  #               env:
+  #                 - name: GOMEMLIMIT
+  #                   value: 2GiB
+  #               resources:
+  #                 limits:
+  #                   memory: 2560Mi
+
+# Registry credentials for private images, if any image in the cluster needs them. The base
+# already mounts a Secret named `kiebitzr-registry` as optional and projects
+# `.dockerconfigjson` to the file name `config.json`, which is the part that usually goes
+# wrong — so all that is left is creating the Secret:
+#
+#   kubectl -n kiebitzr create secret docker-registry kiebitzr-registry \
+#     --docker-server=registry.example --docker-username=<user> --docker-password=<token>
+#
+# Deliberately not generated from a file here: a Docker config holds a credential, and a
+# credential does not belong in a repository. Use a sealed/external secret if the installation
+# is managed in Git.
+#
+# Credential helpers (credsStore, credHelpers) do not work — the release image is a distroless
+# binary and the helper is not in it. Use plain `auths` entries, for example a read-only token.

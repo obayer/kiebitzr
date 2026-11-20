@@ -25,7 +25,9 @@ related:
 
 What the service needs from a cluster, and the figures to size it with. The manifests
 themselves belong to the repository that deploys Kiebitzr — names, namespaces and storage
-classes are installation decisions (ADR 0001). What is written here is the requirement.
+classes are installation decisions (ADR 0001). What is written here is the requirement;
+[`deploy/`](../../deploy) is a template that satisfies it and is meant to be copied into that
+repository, with every one of those decisions left in an overlay.
 
 ## What it needs
 
