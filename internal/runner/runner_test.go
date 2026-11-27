@@ -227,7 +227,7 @@ func newHarness(t *testing.T, pods ...corev1.Pod) *harness {
 		producer: &fakeProducer{errs: map[string]error{}},
 		opener:   &fakeOpener{session: session},
 		session:  session,
-		exporter: metrics.New(),
+		exporter: metrics.New(0),
 	}
 	h.runner = New(h.lister, h.store, NewSerial(h.producer, h.store, log),
 		h.opener, h.exporter, log, Options{

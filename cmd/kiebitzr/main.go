@@ -62,7 +62,13 @@ func main() {
 			"names", strings.Join(unknown, ","))
 	}
 
-	log.Info("starting", "version", version.Version, "commit", version.Commit)
+	// The Grype limit rides along with version and commit because it is a property of the build
+	// and not of the configuration: it is the ceiling -db-max-age is checked against, it is
+	// Grype's number rather than ours, and an image update can lower it. Logged unconditionally
+	// so the answer to "how high may I set it" is in the log of every pod, including the ones
+	// that have not set it yet.
+	log.Info("starting", "version", version.Version, "commit", version.Commit,
+		"grype_db_max_age", vulndb.MaxDatabaseAge())
 
 	// Every setting, once, with the value in effect — the line that answers "did my ConfigMap
 	// land" without a shell in the pod. It is deliberately not a selection: the three values
@@ -137,7 +143,7 @@ func runMatcher(ctx context.Context, cfg config.Config, log *slog.Logger) error 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	exporter := metrics.New()
+	exporter := metrics.New(vulndb.MaxDatabaseAge())
 
 	pods, err := kube.Pods(cfg.Kubeconfig, "kiebitzr/"+version.Version)
 	if err != nil {
@@ -156,6 +162,8 @@ func runMatcher(ctx context.Context, cfg config.Config, log *slog.Logger) error 
 		MinSeverity: cfg.MinSeverity,
 		OnlyFixed:   cfg.OnlyFixed,
 		IgnoreFile:  cfg.IgnoreFile,
+		MaxAge:      cfg.DBMaxAge,
+		Interval:    cfg.Interval,
 	}, version.Version)
 	if err != nil {
 		return fmt.Errorf("vulnerability database: %w", err)

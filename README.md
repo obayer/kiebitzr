@@ -105,7 +105,9 @@ Every run, by default once a day:
 1. List the running pods and collect the image digests they report.
 2. For each new digest, resolve the multi-arch index to the configured platform, generate an
    SBOM with [Syft](https://github.com/anchore/syft) and cache it under the digest.
-3. Match every cached SBOM against the [Grype](https://github.com/anchore/grype) database.
+3. Match every cached SBOM against the [Grype](https://github.com/anchore/grype) database,
+   updating it first unless `-db-max-age` says the one on disk is still young enough — an
+   update rewrites several gigabytes, which on a small node costs more than the download does.
 4. Swap the whole result into the `/metrics` endpoint atomically, and drop the SBOMs of
    digests that are no longer running.
 

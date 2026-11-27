@@ -117,6 +117,16 @@ type Config struct {
 	// CatalogueTimeout bounds the cataloguing stage within a run. Zero means "derive it from
 	// RunTimeout", which validate() does, so the two can never contradict each other.
 	CatalogueTimeout time.Duration
+	// DBMaxAge keeps a vulnerability database younger than this instead of updating it, which
+	// trades the freshness of the findings for write load: an update rewrites 3.2 GB where the
+	// download is 200 MB, so on a small node the rewrite is what a daily update costs.
+	//
+	// Zero updates on every run and is the default, which is what every build before the flag
+	// did. Opt-in rather than a new default on purpose: "your findings are up to three days
+	// older than you thought" is not a change anybody should receive from an image tag. The
+	// upper bound is Grype's and not ours, so it is checked in internal/vulndb where that
+	// number lives — depguard keeps Grype out of this package.
+	DBMaxAge time.Duration
 	// Kubeconfig is a path to a kubeconfig file; empty means in-cluster configuration. Only
 	// a build with the `dev` tag has a flag for it and can act on it.
 	Kubeconfig string
@@ -277,6 +287,7 @@ func newFlagSet(out io.Writer, cfg *Config, excludeNamespaces *string) *flag.Fla
 	fs.DurationVar(&cfg.Interval, "interval", DefaultInterval, "time between the start of two runs")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", DefaultRunTimeout, "how long a single run may take before it is given up")
 	fs.DurationVar(&cfg.CatalogueTimeout, "catalogue-timeout", 0, "how long cataloguing may take within a run; digests not reached are reported as pending. Zero derives it from -run-timeout, leaving time to match and publish")
+	fs.DurationVar(&cfg.DBMaxAge, "db-max-age", 0, "keep a vulnerability database younger than this instead of updating it every run, which trades fresher findings for write load: an update rewrites several gigabytes. Zero updates every run. The upper bound is what Grype accepts and includes -interval — see the running runbook")
 	if kubeconfigSupported {
 		fs.StringVar(&cfg.Kubeconfig, "kubeconfig", "", "path to a kubeconfig file; empty uses the in-cluster configuration")
 	}
@@ -362,6 +373,12 @@ func (c *Config) validate() error {
 	if c.CatalogueTimeout < 0 {
 		errs = append(errs, fmt.Errorf("catalogue-timeout %s must not be negative", c.CatalogueTimeout))
 	}
+	// Only the sign is checked here. The upper bound is Grype's MaxAllowedBuiltAge and depends
+	// on Interval, and it is checked in internal/vulndb, which is the only package allowed to
+	// read that number — so there is exactly one place it can go stale.
+	if c.DBMaxAge < 0 {
+		errs = append(errs, fmt.Errorf("db-max-age %s must not be negative", c.DBMaxAge))
+	}
 	if c.CatalogueTimeout >= c.RunTimeout && c.RunTimeout > 0 {
 		errs = append(errs, fmt.Errorf(
 			"catalogue-timeout %s must be shorter than run-timeout %s, or matching never gets to publish",
@@ -438,6 +455,7 @@ func (c *Config) LogAttrs() []slog.Attr {
 		slog.String("interval", c.Interval.String()),
 		slog.String("run_timeout", c.RunTimeout.String()),
 		slog.String("catalogue_timeout", c.CatalogueTimeout.String()),
+		slog.String("db_max_age", c.DBMaxAge.String()),
 		slog.Bool("catalogue_locally", c.CatalogueLocally),
 		slog.String("work_listen", c.WorkListen),
 		slog.String("matcher_url", redactUserinfo(c.MatcherURL)),

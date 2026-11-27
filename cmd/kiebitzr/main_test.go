@@ -69,4 +69,4 @@ func TestWorkerMetricsAreNotTheMatchersMetrics(t *testing.T) {
 	}
 }
 
-func mux() *http.ServeMux { return newMux(metrics.New().Handler()) }
+func mux() *http.ServeMux { return newMux(metrics.New(0).Handler()) }

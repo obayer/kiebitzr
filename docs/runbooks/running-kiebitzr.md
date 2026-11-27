@@ -118,7 +118,7 @@ Measured on a cluster with 50 running image digests, 75 containers and about 11,
 |---|---|
 | Vulnerability database, active | **3.2 GB** |
 | Same again, during an update | **+3.2 GB** |
-| Downloaded archive, during an update | a few hundred MB |
+| Downloaded archive, during an update | ~200 MB |
 | SBOM per image | ~2 MB (108 MB for 50 images) |
 
 Grype unpacks a new database into a temporary directory **inside the cache directory** and
@@ -128,7 +128,43 @@ run: the findings stop moving and only the freshness metrics say so.
 
 **Give it 10 GB**, on block storage. An SD card would survive the ~3.2 GB written on each
 database update by the numbers, but it is the wrong place for a daily multi-gigabyte rewrite;
-a USB SSD on an ARM board is both faster and the right wear profile.
+a USB SSD on an ARM board is both faster and the right wear profile. If the media is what you
+have rather than what you would choose, `-db-max-age` below trades freshness for exactly this
+number.
+
+### Trading freshness for write load
+
+The download is **200 MB**; activating it rewrites **3.2 GB**. The write load is therefore
+about fifteen times the traffic, and on a small node it, not the transfer, is what a daily
+update costs — roughly **96 GB a month** at the default interval.
+
+`-db-max-age` skips the update while the database on disk is younger than the given age. At
+`-db-max-age 72h` that month becomes about **32 GB**, and findings are up to three days older
+than the newest published database. Nothing is hidden by the skip:
+`kiebitzr_db_built_timestamp_seconds` keeps reporting the build time of the database actually
+matched against, so a deliberately older one is a visible state rather than silence.
+
+It is **off by default**, and a value of `0` means "update on every run" — the behaviour of
+every build before the flag existed. That is deliberate: findings that are quietly three days
+older is not a change anybody should receive from an image tag.
+
+**The bound is not five days, and it is not ours.** Grype refuses a database past its
+`MaxAllowedBuiltAge`, and a database young enough to skip an update keeps ageing until the next
+run — so what has to fit under that limit is `-db-max-age` **plus** `-interval`. At the default
+24 h interval the highest usable value is just under four days. A value that cannot fit is a
+start-up error naming all three numbers.
+
+Because the limit belongs to Grype, a new image can lower it while your configuration stays
+untouched — which would turn a pod that started yesterday into one that refuses to start today.
+Two things make that diagnosable rather than mysterious: the limit of the running build is in
+the `starting` log line and on the `grype_db_max_age` label of `kiebitzr_build_info`, so it can
+be read and alerted on before a restart, and the refusal itself says that the limit is Grype's
+and that an image update is the likely cause.
+
+One failure is worth telling apart from that one, because both quote the same limit: Grype also
+refuses a database that has genuinely aged past it — an installation cut off from the update
+server, or a pod that was down for a week. That one says updates have not been happening; the
+start-up refusal says this build could never satisfy this configuration.
 
 The cache is rebuildable. Losing it costs one slow run — every image is catalogued again — and
 never any data. What "losing it" means in Kubernetes is worth being precise about, because an
@@ -205,7 +241,7 @@ hours. Either leave the limit off or set it to a whole core or two.
 |---|---|
 | Warm run, 50 digests, everything cached | 44 s on a fast x86/arm64 machine; a few minutes on a Cortex-A72 |
 | Cold start, 50 digests | minutes on a fast machine; 20–35 minutes estimated on a Cortex-A72 |
-| Database download and unpack | once a day, a few minutes on a small board |
+| Database download and unpack | once a day by default, a few minutes on a small board; less often with `-db-max-age` |
 
 `-interval` defaults to 24 h because the database is published daily; scanning more often
 re-reads every SBOM and re-runs every match to reach the same findings. `-run-timeout`
@@ -253,6 +289,7 @@ The ones a deployment usually sets:
 | `-cache-dir` | `/var/cache/kiebitzr` | cached SBOMs and the vulnerability database |
 | `-interval` | `24h` | time between the start of two runs; the vulnerability database is published daily, so scanning more often repeats the same work |
 | `-run-timeout` | `2h` | how long a single run may take; deliberately not the interval, because a cold start catalogues every image |
+| `-db-max-age` | `0` (off) | keep a vulnerability database younger than this instead of updating it every run. **Buys write load, not traffic** — see *Trading freshness for write load* below |
 | `-catalogue-timeout` | ¾ of `-run-timeout` | how long cataloguing may take within a run; what it does not reach is published as pending rather than withheld |
 | `-exclude-namespaces` | — | comma-separated namespaces to ignore completely. **The one narrowing that leaves no trace** — see the metrics runbook |
 | `-min-severity` | — | drop findings below a severity; what it drops is counted in `kiebitzr_vulnerability_suppressed` |
@@ -277,14 +314,23 @@ kubectl logs deploy/kiebitzr | head -2
 ```
 
 ```json
-{"level":"INFO","msg":"starting","version":"v2026.1109.2","commit":"f783826…"}
+{"level":"INFO","msg":"starting","version":"v2026.1109.2","commit":"f783826…",
+ "grype_db_max_age":"120h0m0s"}
 {"level":"INFO","msg":"settings","role":"matcher","listen":":8080","platform":"linux/arm64",
  "cache_dir":"/var/cache/kiebitzr","interval":"24h0m0s","run_timeout":"2h0m0s",
- "catalogue_timeout":"1h30m0s","catalogue_locally":true,"exclude_namespaces":"",
- "min_severity":"","only_fixed":false,"build_access_file":"","upgrade_candidates":0, …}
+ "catalogue_timeout":"1h30m0s","db_max_age":"0s","catalogue_locally":true,
+ "exclude_namespaces":"","min_severity":"","only_fixed":false,"build_access_file":"",
+ "upgrade_candidates":0, …}
 ```
 
-Three things about that line are worth knowing:
+Four things about those lines are worth knowing:
+
+- **`grype_db_max_age` is on the `starting` line, not the `settings` line**, because it is a
+  property of the build rather than of the configuration: it is the oldest database this
+  binary's Grype accepts, and so the ceiling `-db-max-age` plus `-interval` is checked
+  against. It is Grype's number and an image update can lower it, which is why it is logged
+  even where nothing has been configured — and why it is also a label on
+  `kiebitzr_build_info`.
 
 - **Values are reported as resolved, not as given.** `catalogue_timeout` above is `1h30m0s`
   although no flag set it — it is three quarters of `-run-timeout`. Comparing the ConfigMap
