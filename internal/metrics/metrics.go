@@ -19,24 +19,43 @@ import (
 )
 
 // buildInfo is the one series that says which binary is answering: always 1, labelled with the
-// version and commit linked into it.
+// version and commit linked into it, and with the database age its vendored Grype will accept.
 //
-// Both exporters register it unconditionally, and this package reads the build metadata itself
-// rather than taking it from a caller. That is deliberate. A metric somebody can forget to wire
-// up is worse than none here, because its absence would mean "an older build" and "nobody
-// called the setter" at the same time — and removing exactly that ambiguity is the point.
+// Version and commit are read by this package itself rather than taken from a caller. That is
+// deliberate. A metric somebody can forget to wire up is worse than none here, because its
+// absence would mean "an older build" and "nobody called the setter" at the same time — and
+// removing exactly that ambiguity is the point.
+//
+// grypeDBMaxAge is the one value that cannot follow that rule: it lives in Grype, which only
+// internal/vulndb may import (depguard), and that package imports this one. So it arrives as a
+// parameter — but a required one, not a setter, which is what keeps the rule intact in
+// substance: a caller cannot forget it without failing to compile.
+//
+// It belongs on this metric rather than in a gauge of its own because it is a property of the
+// build and never of a run: it changes when the image changes, and a gauge would invite an
+// alert on a number that cannot move while the process lives. What it makes answerable is
+// "which limit is this binary holding me to" — the limit is Grype's, a bump can lower it, and
+// a deployment that would then refuse to start should be visible before somebody restarts it.
 //
 // It earns its place because a metric set grows: when a label or a metric is added, every
 // consumer has to be able to tell "this cluster has nothing to report" from "this cluster runs
 // a binary that cannot report it". Diagnosing that from commit dates once was enough (ADR 0010).
-func buildInfo() prometheus.Collector {
+func buildInfo(grypeDBMaxAge string) prometheus.Collector {
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kiebitzr_build_info",
-		Help: "Always 1, labelled with the version and commit of the running binary.",
-	}, []string{"version", "commit"})
-	g.WithLabelValues(version.Version, version.Commit).Set(1)
+		Help: "Always 1, labelled with the version and commit of the running binary, and with" +
+			" the maximum vulnerability database age its Grype accepts (none for a worker).",
+	}, []string{"version", "commit", "grype_db_max_age"})
+	g.WithLabelValues(version.Version, version.Commit, grypeDBMaxAge).Set(1)
 	return g
 }
+
+// dbMaxAgeNone labels a process that holds no vulnerability database, which is every worker. It
+// is spelled out for the reason internal/vulndb spells out its own unknowns: an empty label
+// value cannot be told from an absent one in Prometheus, so "this process has no database"
+// would read as "this build does not have the label" — and "0s" would read worse still, as a
+// limit that refuses everything.
+const dbMaxAgeNone = "none"
 
 // Reasons for kiebitzr_scan_errors_total. Every series exists from the start, so an alert on
 // an increase does not have to cope with a missing series.
@@ -352,7 +371,10 @@ type Exporter struct {
 
 // New returns an Exporter whose result is empty: no images, no findings, and a last-success
 // timestamp of zero — which is what makes "never finished a run" alertable.
-func New() *Exporter {
+//
+// grypeDBMaxAge is published as a label on kiebitzr_build_info; see buildInfo for why it is a
+// parameter when version and commit are not.
+func New(grypeDBMaxAge time.Duration) *Exporter {
 	e := &Exporter{
 		registry: prometheus.NewRegistry(),
 		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -380,7 +402,7 @@ func New() *Exporter {
 	e.registry.MustRegister(
 		e.lastSuccess, e.dbBuilt, e.runDuration, e.errors,
 		snapshotCollector{e},
-		buildInfo(),
+		buildInfo(grypeDBMaxAge.String()),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

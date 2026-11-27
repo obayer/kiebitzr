@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	v6 "github.com/anchore/grype/grype/db/v6"
 	grypematch "github.com/anchore/grype/grype/match"
 	grypepkg "github.com/anchore/grype/grype/pkg"
 	"github.com/anchore/grype/grype/vulnerability"
@@ -481,14 +482,145 @@ func TestUpdateIsOnlyRequiredWhileThereIsNoDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v, want no error", err)
 	}
-	if m.databaseExists() {
-		t.Fatal("databaseExists() = true for an empty directory, want false")
+	if !m.shouldUpdate(nil, false) {
+		t.Fatal("shouldUpdate() = false without a database, want the update that is the database")
 	}
 	if !m.distributionFor(false).RequireUpdateCheck {
 		t.Fatal("RequireUpdateCheck = false without a database, want a failed update to be fatal")
 	}
 	if m.distributionFor(true).RequireUpdateCheck {
 		t.Fatal("RequireUpdateCheck = true with a database, want a failed update to be survivable")
+	}
+}
+
+// -db-max-age exists for write load: an update rewrites the whole database, measured at 3.2 GB
+// against a 200 MB download, so on a small node skipping one is worth three days of slightly
+// older findings. What must not happen is skipping when there is nothing to skip from.
+func TestDatabaseUpdateIsSkippedOnlyWhileItIsYoungEnough(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	built := func(age time.Duration) *v6.Description {
+		return &v6.Description{Built: v6.Time{Time: now.Add(-age)}}
+	}
+
+	tests := []struct {
+		name    string
+		maxAge  time.Duration
+		current *v6.Description
+		exists  bool
+		want    bool
+	}{
+		{"no database at all", 72 * time.Hour, nil, false, true},
+		{"unreadable description", 72 * time.Hour, nil, true, true},
+		// A file that cannot say when it was built is updated rather than trusted: skipping on
+		// an unknown age is how a database quietly ages past the limit Grype enforces.
+		{"database without a build time", 72 * time.Hour, &v6.Description{}, true, true},
+		{"switched off updates every run", 0, built(1 * time.Hour), true, true},
+		{"younger than the budget", 72 * time.Hour, built(1 * time.Hour), true, false},
+		{"just younger than the budget", 72 * time.Hour, built(71 * time.Hour), true, false},
+		{"exactly at the budget", 72 * time.Hour, built(72 * time.Hour), true, true},
+		{"older than the budget", 72 * time.Hour, built(100 * time.Hour), true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := New(Config{Dir: t.TempDir(), MaxAge: tt.maxAge, Interval: time.Hour}, "test")
+			if err != nil {
+				t.Fatalf("New() = %v, want no error", err)
+			}
+			m.now = func() time.Time { return now }
+
+			if got := m.shouldUpdate(tt.current, tt.exists); got != tt.want {
+				t.Fatalf("shouldUpdate() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+// The budget is MaxAge *plus* Interval, and that is the part worth a test of its own: a database
+// young enough to skip keeps ageing until the next run, so a value that looks legal against the
+// five-day limit is not legal once a day of waiting is added to it.
+func TestMaxAgeHasToLeaveRoomForOneMoreInterval(t *testing.T) {
+	limit := MaxDatabaseAge()
+
+	tests := []struct {
+		name     string
+		maxAge   time.Duration
+		interval time.Duration
+		wantErr  bool
+	}{
+		{"off needs no room", 0, limit * 2, false},
+		{"well inside the limit", 72 * time.Hour, 24 * time.Hour, false},
+		{"one second inside the limit", limit - 24*time.Hour - time.Second, 24 * time.Hour, false},
+		{"exactly at the limit", limit - 24*time.Hour, 24 * time.Hour, true},
+		{"inside the limit but not with the interval", limit - time.Hour, 24 * time.Hour, true},
+		{"beyond the limit on its own", limit + time.Hour, 24 * time.Hour, true},
+		{"interval alone exceeds the limit", time.Hour, limit + time.Hour, true},
+		{"negative", -time.Hour, 24 * time.Hour, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(
+				Config{Dir: t.TempDir(), MaxAge: tt.maxAge, Interval: tt.interval}, "test")
+			if tt.wantErr && err == nil {
+				t.Fatalf("New(max-age=%s, interval=%s) = no error, want one", tt.maxAge, tt.interval)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("New(max-age=%s, interval=%s) = %v, want no error", tt.maxAge, tt.interval, err)
+			}
+		})
+	}
+}
+
+// The refusal has to be diagnosable, which is a requirement and not a nicety: the limit is
+// Grype's, so a bump can lower it and turn a configuration that started yesterday into a pod
+// that will not start today — with nothing in this repository changed and nothing in the
+// ConfigMap touched. An operator told only "value too large" has no route to that conclusion.
+func TestMaxAgeRefusalNamesTheBorrowedLimit(t *testing.T) {
+	_, err := New(Config{Dir: t.TempDir(), MaxAge: 96 * time.Hour, Interval: 24 * time.Hour}, "test")
+	if err == nil {
+		t.Fatal("New() = no error, want the budget refused")
+	}
+	got := err.Error()
+
+	for _, want := range []string{
+		"96h0m0s",                 // what was asked for
+		"24h0m0s",                 // the interval that is part of the budget
+		"120h0m0s",                // their sum, so the arithmetic is not left to the reader
+		MaxDatabaseAge().String(), // the limit it is measured against
+		"MaxAllowedBuiltAge",      // the name to search for in Grype
+		grypeModule,               // where it comes from
+		"Grype's and not Kiebitzr's",
+		"an image update can move it",
+		"set -db-max-age below",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("New() = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// When the interval alone is past the limit no positive value can work, so the remedy that
+// names one would send the operator in a circle.
+func TestMaxAgeRefusalAdaptsWhenTheIntervalAloneIsTooLong(t *testing.T) {
+	interval := MaxDatabaseAge() + time.Hour
+	_, err := New(Config{Dir: t.TempDir(), MaxAge: time.Hour, Interval: interval}, "test")
+	if err == nil {
+		t.Fatal("New() = no error, want the budget refused")
+	}
+	got := err.Error()
+
+	if !strings.Contains(got, "no positive -db-max-age can work") {
+		t.Fatalf("New() = %q, want it to say that no positive value helps", got)
+	}
+	if strings.Contains(got, "set -db-max-age below") {
+		t.Fatalf("New() = %q, want no bound that cannot be met", got)
+	}
+}
+
+// Read from Grype rather than written down here, so this guards the assumption that makes the
+// whole check meaningful: a limit of zero would refuse every opt-in configuration there is.
+func TestMaxDatabaseAgeIsAUsableLimit(t *testing.T) {
+	if got := MaxDatabaseAge(); got <= 24*time.Hour {
+		t.Fatalf("MaxDatabaseAge() = %s, want a limit a daily interval can fit under", got)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -66,6 +67,18 @@ type Config struct {
 	OnlyFixed bool
 	// IgnoreFile is a YAML file of Grype ignore rules. Empty means none.
 	IgnoreFile string
+	// MaxAge keeps a database younger than this instead of updating: the run matches against
+	// what is already on disk and asks the update server nothing. Zero updates on every run,
+	// which is the default and the behaviour of every build before the flag existed.
+	//
+	// It buys write load rather than traffic. An update rewrites the whole database — 3.2 GB
+	// measured, against a 200 MB download — so on a small node the rewrite, not the transfer,
+	// is what a daily update costs.
+	MaxAge time.Duration
+	// Interval is the time until the next run. It is configuration of the run loop and not of
+	// the database, and it is here because MaxAge cannot be validated without it: see
+	// checkMaxAge.
+	Interval time.Duration
 }
 
 // Matcher holds the matching policy and opens the database for a run.
@@ -75,6 +88,10 @@ type Matcher struct {
 	matchers     []grypematch.Matcher
 	ignoreRules  []grypematch.IgnoreRule
 	policy       policy
+	maxAge       time.Duration
+	// now is the clock, so the skip decision can be exercised without waiting a day for a
+	// database to age.
+	now func() time.Time
 }
 
 // policy is the part of the configuration that is applied to the findings of a match.
@@ -104,6 +121,15 @@ func New(cfg Config, userAgent string) (*Matcher, error) {
 		return nil, err
 	}
 
+	if cfg.MaxAge < 0 {
+		return nil, fmt.Errorf("database max age %s must not be negative", cfg.MaxAge)
+	}
+	if cfg.MaxAge > 0 {
+		if err := checkMaxAge(cfg.MaxAge, cfg.Interval); err != nil {
+			return nil, err
+		}
+	}
+
 	id := clio.Identification{Name: "kiebitzr", Version: userAgent}
 	distConfig := v6dist.DefaultConfig()
 	distConfig.ID = id
@@ -116,7 +142,76 @@ func New(cfg Config, userAgent string) (*Matcher, error) {
 		matchers:     matcher.NewDefaultMatchers(matcher.Config{}),
 		ignoreRules:  rules,
 		policy:       policy{minSeverity: minSeverity, onlyFixed: cfg.OnlyFixed},
+		maxAge:       cfg.MaxAge,
+		now:          time.Now,
 	}, nil
+}
+
+// MaxDatabaseAge is the age at which Grype refuses to use the database it has.
+//
+// It is read from Grype's own installation defaults rather than written down here, because it
+// is not our number: a Grype bump can move it with nothing in this repository changed. That is
+// also why it is published as a label on kiebitzr_build_info and logged at start-up — a limit
+// that can move under a deployment has to be visible before it refuses one, not only after.
+func MaxDatabaseAge() time.Duration {
+	return v6inst.DefaultConfig(clio.Identification{}).MaxAllowedBuiltAge
+}
+
+// grypeVersion is the vendored Grype module version, for the one error that has to name where
+// a limit nobody here chose came from. Empty when the binary carries no module information,
+// which costs the version in that message and nothing else.
+func grypeVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == grypeModule {
+			return dep.Version
+		}
+	}
+	return ""
+}
+
+// grypeModule is the module path MaxAllowedBuiltAge comes from.
+const grypeModule = "github.com/anchore/grype"
+
+// checkMaxAge rejects a skip budget that Grype's own limit cannot accommodate.
+//
+// The budget is MaxAge *plus* Interval, which is the part that is easy to get wrong: a database
+// young enough to skip an update keeps ageing until the next run, so the worst case is skipping
+// at just under MaxAge and coming back one interval later. At the default 24 h interval a
+// five-day limit therefore allows just under four days, not five.
+//
+// The message is long because the limit is borrowed. A Grype bump that lowers it turns a
+// configuration that started yesterday into a pod that refuses to start today, with nothing in
+// this repository changed and nothing in the ConfigMap touched — and an operator told only
+// "value too large" has no route to that conclusion. It is also deliberately not phrased like
+// the other refusal that cites the same constant, which Open explains: that one is "updates
+// have not been happening", this one is "this build can never satisfy this configuration".
+func checkMaxAge(maxAge, interval time.Duration) error {
+	limit := MaxDatabaseAge()
+	if maxAge+interval < limit {
+		return nil
+	}
+
+	grype := grypeVersion()
+	if grype == "" {
+		grype = "vendored version unknown"
+	}
+	remedy := fmt.Sprintf("set -db-max-age below %s, or to 0 to update on every run", limit-interval)
+	if interval >= limit {
+		remedy = fmt.Sprintf(
+			"no positive -db-max-age can work at -interval %s, so either lower the interval below %s or set -db-max-age to 0 to update on every run",
+			interval, limit)
+	}
+	return fmt.Errorf(
+		"db-max-age %s plus interval %s reaches %s, which is not below the %s this build's Grype"+
+			" accepts before it refuses a database as too old (%s %s, MaxAllowedBuiltAge)."+
+			" That limit is Grype's and not Kiebitzr's, and an image update can move it while the"+
+			" configuration stays unchanged — if this pod started before, that is the likely"+
+			" cause. %s",
+		maxAge, interval, maxAge+interval, limit, grypeModule, grype, remedy)
 }
 
 // Open updates the database if a newer one has been published and opens it for matching. The
@@ -125,9 +220,17 @@ func New(cfg Config, userAgent string) (*Matcher, error) {
 // Grype refuses a database that is too old to be trusted, so an installation that has been
 // cut off from the update server long enough fails here. That is deliberate: the run fails,
 // the previous findings keep being served and the freshness metrics stop moving, which is an
-// alertable condition rather than quietly stale results.
+// alertable condition rather than quietly stale results. Note that this failure and the one
+// checkMaxAge produces cite the same Grype limit for opposite reasons — here the database on
+// disk really is too old, there a configuration could never have kept one fresh enough.
 func (m *Matcher) Open(_ context.Context) (Session, error) {
-	provider, status, err := grype.LoadVulnerabilityDB(m.distributionFor(m.databaseExists()), m.installation, true)
+	// One read serves both decisions: whether a failed update is fatal, and whether to ask for
+	// one at all.
+	current, descErr := v6.ReadDescription(m.installation.DBFilePath())
+	exists := descErr == nil
+
+	provider, status, err := grype.LoadVulnerabilityDB(
+		m.distributionFor(exists), m.installation, m.shouldUpdate(current, exists))
 	if err != nil {
 		return nil, fmt.Errorf("open vulnerability database: %w", err)
 	}
@@ -144,11 +247,26 @@ func (m *Matcher) Open(_ context.Context) (Session, error) {
 	}, nil
 }
 
-// databaseExists reports whether a readable database is already in place, asking the same
-// question Grype's curator asks of the same file.
-func (m *Matcher) databaseExists() bool {
-	_, err := v6.ReadDescription(m.installation.DBFilePath())
-	return err == nil
+// shouldUpdate decides whether this run asks the update server at all.
+//
+// Skipping is the whole point of MaxAge, and it hides nothing: Built() keeps reporting the age
+// of the database actually in use, so kiebitzr_db_built_timestamp_seconds moves with what was
+// matched against rather than with what was intended. A deliberately older database is
+// therefore a visible state and not silence — which is the condition under which this is
+// allowed to exist at all.
+//
+// A database that cannot say when it was built is updated rather than trusted. That is the
+// conservative direction: the alternative is skipping an update on a file whose age is unknown,
+// which is how a database quietly ages past the limit Open describes.
+func (m *Matcher) shouldUpdate(current *v6.Description, exists bool) bool {
+	switch {
+	case !exists || current == nil || current.Built.IsZero():
+		return true
+	case m.maxAge <= 0:
+		return true
+	default:
+		return m.now().Sub(current.Built.Time) >= m.maxAge
+	}
 }
 
 // distributionFor decides whether a failed update is an error or a warning.

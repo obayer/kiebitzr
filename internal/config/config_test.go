@@ -119,6 +119,10 @@ func TestParseRejects(t *testing.T) {
 		}},
 		{"zero work deadline", []string{"-work-deadline", "0"}},
 		{"zero work attempts", []string{"-work-attempts", "0"}},
+		// Zero is valid and means "update every run", so only the sign is rejected here. The
+		// upper bound belongs to Grype and is checked in internal/vulndb.
+		{"negative db max age", []string{"-db-max-age", "-1h"}},
+		{"unparseable db max age", []string{"-db-max-age", "three days"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,6 +130,26 @@ func TestParseRejects(t *testing.T) {
 				t.Fatalf("Parse(%v) = no error, want one", tt.args)
 			}
 		})
+	}
+}
+
+// Zero has to stay a legal value, because it is how the flag is switched off and it is the
+// default: the opt-in only exists if "update on every run" is expressible.
+func TestParseAcceptsDBMaxAge(t *testing.T) {
+	cfg, err := Parse([]string{"-db-max-age", "72h"}, io.Discard)
+	if err != nil {
+		t.Fatalf("Parse(-db-max-age=72h) = %v, want no error", err)
+	}
+	if cfg.DBMaxAge != 72*time.Hour {
+		t.Fatalf("DBMaxAge = %s, want 72h", cfg.DBMaxAge)
+	}
+
+	off, err := Parse([]string{"-db-max-age", "0"}, io.Discard)
+	if err != nil {
+		t.Fatalf("Parse(-db-max-age=0) = %v, want no error", err)
+	}
+	if off.DBMaxAge != 0 {
+		t.Fatalf("DBMaxAge = %s, want zero to switch the skipping off", off.DBMaxAge)
 	}
 }
 

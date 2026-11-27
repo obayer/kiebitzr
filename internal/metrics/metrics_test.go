@@ -53,7 +53,7 @@ func finding(cve string) Vulnerability {
 // Before the first run the endpoint must already answer, and it must say that nothing has
 // succeeded yet rather than stay silent.
 func TestFreshExporterReportsNoSuccess(t *testing.T) {
-	e := New()
+	e := New(0)
 
 	want := `
 # HELP kiebitzr_images Number of image digests the last run catalogued, took from the cache, failed on or did not reach.
@@ -82,19 +82,31 @@ kiebitzr_last_success_timestamp_seconds 0
 // wiring it up. Without this, "no series for a metric" means an older build and a cluster with
 // nothing to report at the same time — the ambiguity that cost a whole diagnosis once.
 func TestBuildInfoIsAlwaysServed(t *testing.T) {
-	// The link-time defaults, because a test binary carries no -ldflags.
-	want := `
-# HELP kiebitzr_build_info Always 1, labelled with the version and commit of the running binary.
-# TYPE kiebitzr_build_info gauge
-kiebitzr_build_info{commit="unknown",version="dev"} 1
-`
-	for name, registry := range map[string]*prometheus.Registry{
-		"matcher": New().registry,
-		"worker":  NewWorker().registry,
-	} {
+	const header = "# HELP kiebitzr_build_info Always 1, labelled with the version and commit" +
+		" of the running binary, and with the maximum vulnerability database age its Grype" +
+		" accepts (none for a worker).\n# TYPE kiebitzr_build_info gauge\n"
+
+	// The link-time defaults for version and commit, because a test binary carries no -ldflags.
+	tests := map[string]struct {
+		registry *prometheus.Registry
+		want     string
+	}{
+		"matcher": {
+			New(120 * time.Hour).registry,
+			`kiebitzr_build_info{commit="unknown",grype_db_max_age="120h0m0s",version="dev"} 1`,
+		},
+		// A worker holds no database at all, and `none` says so. An empty value could not be
+		// told from a build that does not have the label, and "0s" would read as a limit that
+		// refuses everything.
+		"worker": {
+			NewWorker().registry,
+			`kiebitzr_build_info{commit="unknown",grype_db_max_age="none",version="dev"} 1`,
+		},
+	}
+	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			if err := testutil.GatherAndCompare(registry, strings.NewReader(want),
-				"kiebitzr_build_info"); err != nil {
+			if err := testutil.GatherAndCompare(tt.registry,
+				strings.NewReader(header+tt.want+"\n"), "kiebitzr_build_info"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -102,7 +114,7 @@ kiebitzr_build_info{commit="unknown",version="dev"} 1
 }
 
 func TestPublish(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{
 		Images:          []ImageInfo{imageInfo()},
 		Vulnerabilities: []Vulnerability{finding("CVE-2024-0001")},
@@ -132,7 +144,7 @@ kiebitzr_vulnerability{cve="CVE-2024-0001",fix_state="fixed",fixed_in="3.0.12-r0
 // A finding that is gone must vanish with the swap, and nothing may survive from the run
 // before it.
 func TestPublishReplacesTheWholeResult(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{Vulnerabilities: []Vulnerability{finding("CVE-2024-0001"), finding("CVE-2024-0002")}})
 	e.Publish(Result{Vulnerabilities: []Vulnerability{finding("CVE-2024-0002")}})
 
@@ -152,7 +164,7 @@ kiebitzr_vulnerability{cve="CVE-2024-0002",fix_state="fixed",fixed_in="3.0.12-r0
 // Two equal label sets would make every scrape fail as a duplicate series, so Publish has to
 // collapse them whatever the caller hands over.
 func TestPublishCollapsesEqualLabelSets(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{
 		Images:          []ImageInfo{imageInfo(), imageInfo()},
 		Vulnerabilities: []Vulnerability{finding("CVE-2024-0001"), finding("CVE-2024-0001")},
@@ -169,7 +181,7 @@ func TestPublishCollapsesEqualLabelSets(t *testing.T) {
 }
 
 func TestRunSucceeded(t *testing.T) {
-	e := New()
+	e := New(0)
 	finished := time.Unix(1762300000, 0)
 	e.RunSucceeded(finished, 90*time.Second)
 
@@ -184,7 +196,7 @@ func TestRunSucceeded(t *testing.T) {
 // The contract of ADR 0001: a failed run keeps serving the previous result and leaves the
 // freshness timestamp alone, so the gap itself becomes the signal.
 func TestRunFailedKeepsPreviousResult(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{Vulnerabilities: []Vulnerability{finding("CVE-2024-0001")}})
 	e.RunSucceeded(time.Unix(1762300000, 0), time.Minute)
 
@@ -202,7 +214,7 @@ func TestRunFailedKeepsPreviousResult(t *testing.T) {
 }
 
 func TestErrorsBy(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.ErrorsBy(ReasonImageID, 3)
 	e.ErrorsBy(ReasonImageID, 0)
 
@@ -212,7 +224,7 @@ func TestErrorsBy(t *testing.T) {
 }
 
 func TestDatabaseBuilt(t *testing.T) {
-	e := New()
+	e := New(0)
 	built := time.Unix(1762200000, 0)
 	e.DatabaseBuilt(built)
 
@@ -222,7 +234,7 @@ func TestDatabaseBuilt(t *testing.T) {
 }
 
 func TestHandlerServesTheOwnRegistryOnly(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{Images: []ImageInfo{imageInfo()}})
 
 	rec := httptest.NewRecorder()
@@ -245,7 +257,7 @@ func TestHandlerServesTheOwnRegistryOnly(t *testing.T) {
 // The risk score is a value, not a label, and it is reported per digest as the highest of
 // that digest's findings — triage starts at the worst one.
 func TestPublishReportsTheHighestRiskPerDigest(t *testing.T) {
-	e := New()
+	e := New(0)
 	low, high := finding("CVE-2024-0001"), finding("CVE-2024-0002")
 	low.Risk = 12.5
 	high.Risk = 73.25
@@ -269,7 +281,7 @@ kiebitzr_image_risk_score{image_digest="` + digest + `"} 73.25
 // Exploitation in the wild is a label, because "critical and exploited" is the set that gets
 // patched tonight and it has to be selectable.
 func TestKnownExploitedIsALabel(t *testing.T) {
-	e := New()
+	e := New(0)
 	exploited := finding("CVE-2024-0003")
 	exploited.KnownExploited = true
 	e.Publish(Result{Vulnerabilities: []Vulnerability{exploited}})
@@ -284,7 +296,7 @@ func TestKnownExploitedIsALabel(t *testing.T) {
 // report fix_state="fixed", which is why that label cannot answer "can I patch this at all"
 // and this one has to exist.
 func TestPackageTypeSeparatesDistroFromCompiledFindings(t *testing.T) {
-	e := New()
+	e := New(0)
 	distro, compiled := finding("CVE-2024-0004"), finding("CVE-2024-0005")
 	compiled.Package, compiled.PackageType = "stdlib", "go-module"
 	e.Publish(Result{Vulnerabilities: []Vulnerability{distro, compiled}})
@@ -304,7 +316,7 @@ func TestPackageTypeSeparatesDistroFromCompiledFindings(t *testing.T) {
 // two. This guards the deduplication key: vulnerabilityLabels clears the risk score and
 // nothing else, and clearing the type there would silently merge the two buckets above.
 func TestPublishKeepsFindingsThatDifferOnlyInPackageType(t *testing.T) {
-	e := New()
+	e := New(0)
 	first, second := finding("CVE-2024-0001"), finding("CVE-2024-0001")
 	second.PackageType = "go-module"
 	e.Publish(Result{Vulnerabilities: []Vulnerability{first, second}})
@@ -318,7 +330,7 @@ func TestPublishKeepsFindingsThatDifferOnlyInPackageType(t *testing.T) {
 // Deduplication keys on the label set alone for exactly this reason: a duplicate label set
 // makes the whole scrape fail, and the risk score is not part of the identity of a series.
 func TestPublishCollapsesEqualLabelSetsWithDifferentRisk(t *testing.T) {
-	e := New()
+	e := New(0)
 	first, second := finding("CVE-2024-0001"), finding("CVE-2024-0001")
 	first.Risk = 10
 	second.Risk = 90
@@ -346,7 +358,7 @@ func TestPublishKeepsFindingsThatDifferOnlyInLocation(t *testing.T) {
 	second := first
 	second.Location = "/usr/local/bin/tini"
 
-	e := New()
+	e := New(0)
 	e.Publish(Result{Vulnerabilities: []Vulnerability{first, second}})
 
 	if _, err := e.registry.Gather(); err != nil {
@@ -361,7 +373,7 @@ func TestPublishKeepsFindingsThatDifferOnlyInLocation(t *testing.T) {
 // removed has to be a number. Without it an ignore rule matching half the cluster reads
 // exactly like a cluster with nothing to report (kbz:req:00001).
 func TestPublishReportsWhatTheFiltersRemoved(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{
 		Vulnerabilities: []Vulnerability{finding("CVE-2024-0001")},
 		Suppressions: []Suppressed{
@@ -386,7 +398,7 @@ kiebitzr_vulnerability_suppressed{image_digest="` + digest + `",reason="min_seve
 // would be three series per image bought for an answer nobody asked for, and the configuration
 // itself is in the start-up log.
 func TestPublishWithoutSuppressionsServesNoSeries(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{Vulnerabilities: []Vulnerability{finding("CVE-2024-0001")}})
 
 	if got := scrape(t, e); strings.Contains(got, "kiebitzr_vulnerability_suppressed") {
@@ -397,7 +409,7 @@ func TestPublishWithoutSuppressionsServesNoSeries(t *testing.T) {
 // Two tallies for one digest and filter would be a duplicate series and fail the scrape, so
 // the count must not be part of the deduplication key.
 func TestPublishCollapsesEqualSuppressionLabelSets(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{Suppressions: []Suppressed{
 		{Digest: digest, Reason: SuppressedOnlyFixed, Count: 3},
 		{Digest: digest, Reason: SuppressedOnlyFixed, Count: 9},
@@ -418,7 +430,7 @@ kiebitzr_vulnerability_suppressed{image_digest="` + digest + `",reason="only_fix
 }
 
 func TestPublishReportsFailuresPerDigest(t *testing.T) {
-	e := New()
+	e := New(0)
 	e.Publish(Result{
 		Failures: []Failure{{Digest: digest, Reason: ReasonUnreachable}},
 		Counts:   Counts{Failed: 1},

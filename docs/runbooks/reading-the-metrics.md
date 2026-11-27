@@ -46,7 +46,7 @@ telling the truth.
 | `kiebitzr_db_built_timestamp_seconds` | gauge | — | when the vulnerability database in use was built |
 | `kiebitzr_run_duration_seconds` | gauge | — | how long the last completed run took |
 | `kiebitzr_scan_errors_total` | counter | `reason` | errors by cause; every reason exists from the start, at `0` |
-| `kiebitzr_build_info` | gauge, always `1` | `version`, `commit` | which binary is answering — served by matchers and workers alike |
+| `kiebitzr_build_info` | gauge, always `1` | `version`, `commit`, `grype_db_max_age` | which binary is answering — served by matchers and workers alike. `grype_db_max_age` is the oldest database the build's Grype accepts, and so the ceiling `-db-max-age` plus `-interval` has to stay under; `none` on a worker, which holds no database. It is here because the limit is Grype's: an image update can lower it and refuse a configuration that started yesterday, and this is where that is visible before somebody restarts the pod |
 | `kiebitzr_image_upgrade_candidate` | gauge | `image_digest`, `tag` | how many of a digest's in-scope findings the best candidate image clears. **`0` is an answer**, not an absence |
 | `kiebitzr_image_upgrade_unknown` | gauge, always `1` | `image_digest`, `reason` | the deployability question could not be answered. **Unknown is not "no fix"** |
 
@@ -661,6 +661,12 @@ Age of the vulnerability database:
 time() - kiebitzr_db_built_timestamp_seconds
 ```
 
+This is the database actually matched against, not the newest one published, so it is also how
+a deliberately skipped update shows up where `-db-max-age` is set. Expect it to range up to
+`db-max-age` plus `-interval` there, and read any threshold on it against that sum rather than
+against a day. The hard ceiling is the build's own, published on the `grype_db_max_age` label of
+`kiebitzr_build_info`: past it Grype refuses the database and the run fails.
+
 ### Pending is not failed, and it is not clean either
 
 A digest is **pending** when cataloguing ran out of its budget before reaching it. Nothing is
@@ -812,6 +818,9 @@ groups:
         annotations:
           summary: No completed scan for a day and a half — the findings being served are stale
 
+      # 48h assumes -db-max-age is off. With it set, raise this above db-max-age plus
+      # -interval, or the rule fires on behaviour somebody configured — and an alarm nobody
+      # can clear is a state, which belongs on the dashboard instead.
       - alert: KiebitzrDatabaseStale
         expr: time() - kiebitzr_db_built_timestamp_seconds > 48 * 3600
         for: 1h

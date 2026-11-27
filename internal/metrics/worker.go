@@ -45,8 +45,10 @@ func NewWorker() *WorkerExporter {
 		e.images,
 		// A worker publishes this too: a pool where one pod lags behind the others is exactly
 		// the case that is invisible otherwise, and it carries none of the matcher's state, so
-		// it cannot make a worker look like a matcher that never finished a run.
-		buildInfo(),
+		// it cannot make a worker look like a matcher that never finished a run. The database
+		// age limit is `none` here rather than a duration, because a worker holds no
+		// vulnerability database at all — it catalogues and hands the SBOM back (ADR 0009).
+		buildInfo(dbMaxAgeNone),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

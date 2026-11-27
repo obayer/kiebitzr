@@ -229,7 +229,7 @@
     {
       "type": "stat",
       "title": "Age of vulnerability database",
-      "description": "Runs can keep succeeding against a database that no longer knows about this week's advisories.",
+      "description": "Runs can keep succeeding against a database that no longer knows about this week's advisories. Amber at a day is informational, and expected where -db-max-age is set: a deliberately older database is a configured state, not a fault. Red is tied to the real failure point instead — Grype refuses a database past five days, so four days is the last reading at which a daily run can still recover.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -268,7 +268,7 @@
               },
               {
                 "color": "#d03b3b",
-                "value": 172800
+                "value": 345600
               }
             ]
           }
@@ -572,7 +572,8 @@
             },
             "renameByName": {
               "version": "Version",
-              "commit": "Commit"
+              "commit": "Commit",
+              "grype_db_max_age": "Grype DB age limit"
             }
           }
         }

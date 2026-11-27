@@ -71,7 +71,7 @@ func TestRunAgainstARealImage(t *testing.T) {
 		t.Fatalf("vulndb.New() = %v, want no error", err)
 	}
 
-	exporter := metrics.New()
+	exporter := metrics.New(0)
 	lister := &fakeLister{pods: []corev1.Pod{runningPod("web-0", image, repository+"@"+digest)}}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -240,7 +240,7 @@ func assertAnIgnoreRuleIsCounted(
 		t.Fatalf("vulndb.New() = %v, want no error", err)
 	}
 
-	exporter := metrics.New()
+	exporter := metrics.New(0)
 	New(lister, store, NewSerial(cataloguer, store, log), filtered, exporter, log, Options{
 		Interval: 20 * time.Minute, Timeout: 20 * time.Minute, CatalogueTimeout: 15 * time.Minute,
 	}).Run(context.Background())
